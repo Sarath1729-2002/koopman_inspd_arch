@@ -1,6 +1,5 @@
 runs/
 logs/
-third_party/
 data/
 __pycache__/
 *.pyc
