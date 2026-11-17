@@ -1,36 +1,35 @@
-# koopman_loop — Koopman course correction for looped LLMs (Ouro-1.4B)
+# koopman_loopgen — Phase 1: does a Koopman-stable loop extrapolate better?
 
-**Question.** Ouro runs its whole 24-layer stack 4 times and gets worse when looped more
-(paper Tab. 10: MMLU 67.5 → 64.5, ARC-C 60.9 → 58.2 at 8 loops; AIME-24 65 → 39 for the Thinking model).
-Can dynamics learned *inside* the trained depth keep the extra loops on track, and turn them into
-gains, better than simple non-dynamical fixes?
+Testbed: the looped-transformer length-generalisation tasks of Fan et al. (ICLR 2025), with their
+setup (GPT-2 blocks, NoPE, input injection, loss after exactly T(n) loops, curriculum, online data).
+Harder (longer) instances need MORE loops, so stable extrapolation is directly worth accuracy.
 
-Since you can always just stop at 4 loops, matching 4 loops is worth nothing. The bar is **beating STOP**.
+| task | train lengths | eval lengths | loops T(n) | block |
+|---|---|---|---|---|
+| parity | 1–20 | 5–50 | n | 1 layer |
+| copy (digits) | 1–19 | 5–40 | n | 2 layers |
+| binary addition | 1–19 | 5–35 | n+1 | 3 layers |
 
-## Stages (one job: `slurm/ouro_poc.sh`)
-| stage | script | what |
-|---|---|---|
-| 0 | `kl.check` | hooks fire once per loop; depth-d readout from a 12-loop forward equals a real d-loop model; drift stats |
-| 1 | `kl.fit` | on GSM8K train, depths 1–4 only: PCA(256) of the residual stream, DMD, Koopman autoencoder |
-| 2 | `kl.evaluate` | depths 1–12 × 11 policies: GSM8K gold-solution NLL (primary), ARC-C accuracy (secondary), paired bootstrap verdict |
-| 3 | `kl.generate` | GSM8K 4-shot greedy accuracy at depths 4/8/12 for none, best Koopman, best control |
+Arms (same width 256, same block; `klg/model.py`):
+- `plain` — h ← Block(h + e)  (Fan et al.)
+- `gainctl` — LayerNorm on the loop output (normalisation control)
+- `koopman` — h ← Λh + e + f(h + e), Λ = block-diagonal rotation-scaling, radius ≤ 1 (spectrally bounded backbone)
+- `koopman_re` — `koopman` + every 4 loops decode to the output vocabulary and re-embed (course correction, trained in)
 
-Policies act on the state after every loop past 4:
-controls `norm_match`, `pca_project@a`; Koopman `dmd_pull@a`, `kae_pull@a/k` (pull toward the
-Koopman k-step rollout every k loops: periodic course correction).
+Measured per length: exact match with T(n) loops (oracle), with 2·T(n) loops (over-looping),
+with loops chosen by confidence in 1..3T (no oracle), the full accuracy-vs-loops curve, and state-norm drift.
 
-**Verdict (pre-registered):** SURVIVES iff a Koopman policy at some depth > 4 has lower GSM8K NLL than
-STOP *and* than the best control at that depth (95% bootstrap CIs exclude 0), with ARC-C no more than 1 pt below STOP.
+**Kill rule (pre-registered, `klg/report.py`)**: SURVIVES if the best Koopman arm beats the best control by
+≥ 0.10 OOD exact match averaged over tasks, OR plain loses > 0.20 when over-looped while Koopman loses ≤ 0.05.
+Otherwise CLOSED.
 
-## Run on TamIA
+## Run (TamIA)
 ```bash
-cd ~/koopman_loop
-export HF_HOME=$SCRATCH/hf
-bash scripts/setup_ouro.sh          # login node: venv ~/venvs/ouro (transformers 4.54.1), weights, data
-source ~/venvs/ouro/bin/activate && bash tests/smoke.sh   # CPU check with a mock looped model, ~1 min
-mkdir -p logs && sbatch slurm/ouro_poc.sh
-grep -E "=====|\[check\]|verified|Error|Traceback" logs/koopman_ouro-*.out
-cat runs/ouro14/REPORT.md
+mkdir -p ~/koopman_loopgen && tar xzf koopman_loopgen.tar.gz --strip-components=1 -C ~/koopman_loopgen
+cd ~/koopman_loopgen
+module load gcc arrow python/3.11 && source ~/venvs/ktrm/bin/activate   # existing env: torch + matplotlib
+bash tests/smoke.sh                                                      # ~1-2 min, ends with SMOKE OK
+mkdir -p logs && sbatch slurm/phase1.sh                                  # 36 runs, 8 in parallel on 4 H100s
 ```
-The job stops right after stage 0 if the hooks don't match the real model; send me the log in that case.
-Other model: `MODEL=ByteDance/Ouro-2.6B OUT=runs/ouro26 sbatch slurm/ouro_poc.sh` (after downloading it).
+Progress: `grep -h "done:" logs/phase1/*.log`. Result: `runs/REPORT.md`, `runs/phase1.png`.
+Resumable: rerunning `sbatch slurm/phase1.sh` skips finished runs.
