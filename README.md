@@ -1,9 +1,15 @@
-# drift_kill — periodic re-encoding as error correction (not computation)
+# lm_drift — does periodic re-encoding fix long-context drift in a real (byte-level) linear-RNN LM?
 
-The S5 test showed boundary maps can't do composition (needs |G|^k cases). Cleanup only needs |G| cases.
-Tasks the linear core solves exactly (parity, mod-5 counting); train <= 64, test to 4096; any long-length
-failure is drift. Re-encoding must beat a unit-circle core AND norm-only renormalisation. Verdict: dk/report.py.
+drift_kill showed re-encoding = error correction works when the state has a codebook. Here the state is continuous.
+Byte LMs on wikitext-103 with Griffin RG-LRU and Mamba-style cores, trained at context 512, tested at 8192 (16x).
+Arms: base · reset (forget every 512) · clamp (clip state to in-dist range) · ae (post-hoc denoising AE re-encoder,
+training-free) · re64 (trained-in decode->normalise->re-encode every 64 tokens). Verdict: lmd/report.py.
 
-    cd ~/koopman_inspd_arch && tar xzf drift_kill.tgz && cd drift_kill && mkdir -p logs
+    # LOGIN NODE (internet), once:
+    cd ~/koopman_inspd_arch && tar xzf lm_drift.tgz && cd lm_drift && mkdir -p logs
+    module load gcc arrow python/3.11 && source ~/venvs/ktrm/bin/activate
+    export HF_HOME=$SCRATCH/hf
+    python -c "import huggingface_hub, pyarrow" || pip install huggingface_hub
+    python scripts/prep_data.py          # -> data/train.bin (~540 MB), data/eval.bin
     OMP_NUM_THREADS=4 bash tests/smoke.sh
-    sbatch slurm/run.sh        # -> runs_drift/REPORT.md, runs_drift/drift.png
+    sbatch slurm/run.sh                  # ~30-45 min -> results/REPORT.md
