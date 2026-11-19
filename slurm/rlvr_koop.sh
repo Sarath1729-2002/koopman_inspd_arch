@@ -20,7 +20,7 @@ rm -rf "$CK"; mkdir -p "$CK" logs/rlx "$OUT"
 for f in data/gsm8k_train.jsonl data/gsm8k_test.jsonl rlx/common.py; do [ -f $f ] || { echo "$f missing (python -m rlx.prep)"; exit 1; }; done
 echo "===== $(date '+%F %T') node $(hostname)  ckpt $CK"; nvidia-smi -L
 X="--ckpt $CK --out $OUT ${EXTRA:-}"
-CUDA_VISIBLE_DEVICES=0 python -m rlx.train_ref $X > logs/rlx/ref.log 2>&1 || echo "FAILED ref (logs/rlx/ref.log)" &
+CUDA_VISIBLE_DEVICES=0 python -m rlx.train_ref $X > logs/rlx/ref.log 2>&1 || { echo "FAILED ref (logs/rlx/ref.log)"; touch "$CK/REF_FAILED"; tail -25 logs/rlx/ref.log; } &
 CUDA_VISIBLE_DEVICES=1 python -m rlx.extrap --mode oneshot $X > logs/rlx/oneshot.log 2>&1 || echo "FAILED oneshot" &
 CUDA_VISIBLE_DEVICES=2 python -m rlx.extrap --mode cc --method koop3 $X > logs/rlx/cc_koop3.log 2>&1 || echo "FAILED cc koop3" &
 CUDA_VISIBLE_DEVICES=3 python -m rlx.extrap --mode cc --method line3 $X > logs/rlx/cc_line3.log 2>&1 || echo "FAILED cc line3" &

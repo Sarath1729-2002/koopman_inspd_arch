@@ -8,6 +8,8 @@ SYS = "Solve the problem step by step. Put the final answer in \\boxed{}."
 
 
 def load_model(name, dev):
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     from transformers import AutoModelForCausalLM, AutoTokenizer
     tok = AutoTokenizer.from_pretrained(name)
     tok.padding_side = "left"
@@ -56,9 +58,12 @@ def generate(model, tok, prompts, max_new, temp, dev, bs=256):
     outs = []
     for i in range(0, len(prompts), bs):
         enc = tok(prompts[i:i + bs], return_tensors="pt", padding=True).to(dev)
-        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=dev.startswith("cuda")):
-            g = model.generate(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"], max_new_tokens=max_new, do_sample=temp > 0, temperature=temp if temp > 0 else None,
-                               top_p=1.0, top_k=0, pad_token_id=tok.pad_token_id)
+        # generation in fp32/TF32 (no bf16 autocast: it produced NaN logits -> multinomial device assert),
+        # plus HF's guards that replace any inf/nan and renormalise before sampling
+        g = model.generate(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"], max_new_tokens=max_new,
+                           do_sample=temp > 0, temperature=temp if temp > 0 else None, top_p=1.0 if temp > 0 else None,
+                           top_k=None, remove_invalid_values=True, renormalize_logits=temp > 0,
+                           pad_token_id=tok.pad_token_id)
         P = enc["input_ids"].shape[1]
         outs += [(enc["input_ids"][j], g[j, P:]) for j in range(len(g))]
     return outs
