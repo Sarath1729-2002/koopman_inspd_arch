@@ -20,7 +20,10 @@ from .common import evaluate, grpo_step, load_gsm, load_model, params, set_weigh
 
 
 def wait(path, poll=20):
+    fail = os.path.join(os.path.dirname(path), "REF_FAILED")
     while not os.path.exists(path):
+        if os.path.exists(fail):
+            raise SystemExit(f"reference run failed ({fail}); stopping instead of waiting")
         time.sleep(poll)
 
 

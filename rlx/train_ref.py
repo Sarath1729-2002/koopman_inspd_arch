@@ -63,4 +63,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys, traceback
+    try:
+        main()
+    except Exception:
+        traceback.print_exc()
+        ck = sys.argv[sys.argv.index("--ckpt") + 1] if "--ckpt" in sys.argv else "ckpt_rlx"
+        os.makedirs(ck, exist_ok=True)
+        open(os.path.join(ck, "REF_FAILED"), "w").write("failed")      # other GPUs stop waiting
+        raise

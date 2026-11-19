@@ -73,7 +73,7 @@ def evaluate(model, tok, items, dev, max_new=400):
     return acc
 
 
-def grpo_step(model, tok, opt, items, n_samples, max_new, temp, dev, micro=32):
+def grpo_step(model, tok, opt, items, n_samples, max_new, temp, dev, micro=8):
     """On-policy policy gradient with group-normalised advantages (one update per batch, no KL; Dr.GRPO/DAPO style)."""
     prompts = [prompt(tok, q) for q, _ in items for _ in range(n_samples)]
     golds = [g for _, g in items for _ in range(n_samples)]
@@ -96,8 +96,10 @@ def grpo_step(model, tok, opt, items, n_samples, max_new, temp, dev, micro=32):
         for j, x in enumerate(seqs):
             ids[j, :len(x)] = x; msk[j, :len(x)] = 1
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=dev.startswith("cuda")):
-            lg = model(input_ids=ids, attention_mask=msk).logits[:, :-1].float()
-        lp = -F.cross_entropy(lg.reshape(-1, lg.shape[-1]), ids[:, 1:].reshape(-1), reduction="none").view(len(seqs), -1)
+            lg = model(input_ids=ids, attention_mask=msk).logits[:, :-1]
+        # memory-lean log-prob of the taken tokens (no full float copy of the 152k-vocab logits)
+        lp = torch.gather(lg, -1, ids[:, 1:, None]).squeeze(-1).float() - torch.logsumexp(lg.float(), -1)
+        del lg
         comp = torch.zeros_like(lp)
         for j, (x, p) in enumerate(zip(seqs, plen)):
             comp[j, p - 1:len(x) - 1] = 1
