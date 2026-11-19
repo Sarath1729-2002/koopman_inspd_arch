@@ -39,8 +39,12 @@ class Traj:
 
     def __init__(self, D, r, d=3, alpha=1.0):
         T = D.shape[0]
-        G = D @ D.T
+        if not torch.isfinite(D).all():
+            raise ValueError("non-finite deltas in the prefix: the reference run diverged")
+        G = (D @ D.T).double()
+        G = G + 1e-10 * G.diagonal().mean().clamp(min=1e-30) * torch.eye(T, dtype=G.dtype, device=G.device)
         ev, U = torch.linalg.eigh(G)
+        ev, U = ev.to(D.dtype), U.to(D.dtype)
         ev, U = ev.flip(0)[:r].clamp(min=1e-12), U.flip(1)[:, :r]
         s = ev.sqrt()
         self.V = (D.T @ U) / s                                         # [P, r] orthonormal
@@ -106,7 +110,7 @@ def main():
     ap.add_argument("--samples", type=int, default=8)
     ap.add_argument("--max_new", type=int, default=320)
     ap.add_argument("--temp", type=float, default=1.0)
-    ap.add_argument("--lr", type=float, default=2e-6)
+    ap.add_argument("--lr", type=float, default=1e-6)
     ap.add_argument("--train", default="data/gsm8k_train.jsonl")
     ap.add_argument("--test", default="data/gsm8k_test.jsonl")
     ap.add_argument("--n_test", type=int, default=1319)
@@ -183,7 +187,7 @@ def main():
                 p.add_((tr.V @ disp).view(p.shape).to(p.dtype))       # re-anchored: shift from the CURRENT real weights
         tau += k
         rr = min(a.r_real, a.t_final - tau)
-        rw = [grpo_step(model, tok, opt, rng.sample(train, a.prompts), a.samples, a.max_new, a.temp, dev) for _ in range(rr)]
+        rw = [grpo_step(model, tok, opt, rng.sample(train, a.prompts), a.samples, a.max_new, a.temp, dev)["reward"] for _ in range(rr)]
         if a.method == "koop3":
             for n in names:
                 _, state[n] = trajs[n].koop_roll(state[n], rr)          # keep the velocity state in step with time

@@ -20,7 +20,7 @@ def main():
     ap.add_argument("--samples", type=int, default=8)
     ap.add_argument("--max_new", type=int, default=320)
     ap.add_argument("--temp", type=float, default=1.0)
-    ap.add_argument("--lr", type=float, default=2e-6)
+    ap.add_argument("--lr", type=float, default=1e-6)
     ap.add_argument("--train", default="data/gsm8k_train.jsonl")
     ap.add_argument("--test", default="data/gsm8k_test.jsonl")
     ap.add_argument("--n_test", type=int, default=1319)
@@ -42,11 +42,21 @@ def main():
     res["acc"]["0"] = evaluate(model, tok, test, dev)
     print(f"[ref] step 0 acc {res['acc']['0']:.3f} ({time.time() - t0:.0f}s)", flush=True)
     for t in range(1, a.steps + 1):
-        r = grpo_step(model, tok, opt, rng.sample(train, a.prompts), a.samples, a.max_new, a.temp, dev)
-        res["reward"].append(r)
+        info = grpo_step(model, tok, opt, rng.sample(train, a.prompts), a.samples, a.max_new, a.temp, dev)
+        res["reward"].append(info["reward"]); res.setdefault("steps_info", []).append(info)
+        skips = sum(not x["updated"] for x in res["steps_info"])
+        if not info["updated"]:
+            print(f"[ref] step {t}: NON-FINITE loss/grad, update skipped ({skips} so far)", flush=True)
+        if skips > 5:
+            raise RuntimeError("more than 5 non-finite updates: training is numerically broken")
+        if not all(torch.isfinite(p).all() for p in params(model).values()):
+            raise RuntimeError(f"non-finite weights at step {t}")
         if t <= a.t_cut or t in keep:
             torch.save(snapshot_delta(model, base), os.path.join(a.ckpt, "deltas", f"step{t}.pt"))
         if t == a.t_cut:
+            r0 = sum(res["reward"][:5]) / 5; rT = sum(res["reward"][-10:]) / 10
+            if rT < 0.5 * r0:
+                raise RuntimeError(f"reward collapsed by step {t} ({r0:.3f} -> {rT:.3f}); aborting before extrapolation")
             torch.save(opt.state_dict(), os.path.join(a.ckpt, "opt_Tcut.pt"))
             res["acc"][str(t)] = evaluate(model, tok, test, dev)
             open(os.path.join(a.ckpt, "PREFIX_DONE"), "w").write("ok")
@@ -55,8 +65,11 @@ def main():
             res["acc"][str(t)] = evaluate(model, tok, test, dev)
             print(f"[ref] step {t} acc {res['acc'][str(t)]:.3f}", flush=True)
             json.dump(res, open(os.path.join(a.out, "ref.json"), "w"), indent=1)
-        if t % 10 == 0:
-            print(f"[ref] step {t} mean reward(last10) {sum(res['reward'][-10:]) / 10:.3f} ({time.time() - t0:.0f}s)", flush=True)
+        if t % 5 == 0 or t <= 3:
+            last = res["steps_info"][-5:]
+            print(f"[ref] step {t} reward(last5) {sum(x['reward'] for x in last) / len(last):.3f} "
+                  f"grad_norm {info['grad_norm']:.3f} loss {info['loss']:+.4f} len {info['mean_len']:.0f} "
+                  f"trunc {info['trunc_frac']:.2f} ({time.time() - t0:.0f}s)", flush=True)
     res["minutes"] = (time.time() - t0) / 60
     json.dump(res, open(os.path.join(a.out, "ref.json"), "w"), indent=1)
     open(os.path.join(a.ckpt, "REF_DONE"), "w").write("ok")

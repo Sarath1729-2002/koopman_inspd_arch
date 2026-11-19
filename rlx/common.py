@@ -4,6 +4,10 @@ import json, math, os, random, re
 import torch
 import torch.nn.functional as F
 
+
+def np_isfinite(x):
+    return x == x and abs(x) != float("inf")
+
 SYS = "Solve the problem step by step. Put the final answer in \\boxed{}."
 
 
@@ -90,6 +94,7 @@ def grpo_step(model, tok, opt, items, n_samples, max_new, temp, dev, micro=8):
     A = ((Rg - Rg.mean(1, keepdim=True)) / (Rg.std(1, keepdim=True) + 1e-4)).view(-1)
     keep = [i for i in range(len(gens)) if abs(A[i]) > 1e-6]
     opt.zero_grad(set_to_none=True)
+    tot_loss = 0.0
     ntok = sum(int((gens[i][1] != tok.pad_token_id).sum()) for i in keep) or 1
     for s in range(0, len(keep), micro):
         idx = keep[s:s + micro]
@@ -100,20 +105,26 @@ def grpo_step(model, tok, opt, items, n_samples, max_new, temp, dev, micro=8):
         msk = torch.zeros((len(seqs), L), dtype=torch.long, device=dev)
         for j, x in enumerate(seqs):
             ids[j, :len(x)] = x; msk[j, :len(x)] = 1
-        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=dev.startswith("cuda")):
-            lg = model(input_ids=ids, attention_mask=msk).logits[:, :-1]
-        # memory-lean log-prob of the taken tokens (no full float copy of the 152k-vocab logits)
-        lp = torch.gather(lg, -1, ids[:, 1:, None]).squeeze(-1).float() - torch.logsumexp(lg.float(), -1)
+        lg = model(input_ids=ids, attention_mask=msk).logits[:, :-1]          # fp32 / TF32, no autocast
+        lp = torch.gather(lg, -1, ids[:, 1:, None]).squeeze(-1) - torch.logsumexp(lg, -1)
         del lg
         comp = torch.zeros_like(lp)
         for j, (x, p) in enumerate(zip(seqs, plen)):
             comp[j, p - 1:len(x) - 1] = 1
         adv = A[idx].to(dev)[:, None]
-        loss = -(adv * lp * comp).sum() / ntok
+        contrib = torch.where(comp.bool(), adv * lp, torch.zeros_like(lp))   # NaN-safe (0 * NaN would be NaN)
+        loss = -contrib.sum() / ntok
         loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    opt.step()
-    return float(R.mean())
+        tot_loss += float(loss)
+    gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    ok = bool(torch.isfinite(gn)) and np_isfinite(tot_loss)
+    if ok:
+        opt.step()
+    else:
+        opt.zero_grad(set_to_none=True)
+    lens = [int((o != tok.pad_token_id).sum()) for _, o in gens]
+    return {"reward": float(R.mean()), "loss": tot_loss, "grad_norm": float(gn), "updated": ok,
+            "kept": len(keep), "mean_len": sum(lens) / len(lens), "trunc_frac": sum(l >= max_new for l in lens) / len(lens)}
 
 
 def params(model):
