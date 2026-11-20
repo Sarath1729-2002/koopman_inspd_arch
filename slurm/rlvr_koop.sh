@@ -13,8 +13,8 @@
 set -uo pipefail
 cd "$SLURM_SUBMIT_DIR"
 module load gcc arrow python/3.11 cuda
-source "${VENV:-$HOME/venvs/ouro}/bin/activate"
-export PYTHONPATH=".${PYTHONPATH:+:$PYTHONPATH}" OMP_NUM_THREADS=4 HF_HOME="${HF_HOME:-$SCRATCH/hf}" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+source "${RLX_VENV:-$HOME/venvs/ouro}/bin/activate"
+export PYTHONPATH=".${PYTHONPATH:+:$PYTHONPATH}" OMP_NUM_THREADS=4 HF_HOME="$SCRATCH/hf" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 CK="${CK:-$SCRATCH/ckpt_rlx}"; OUT="${OUT:-results_rlx}"
 rm -rf "$CK"; mkdir -p "$CK" logs/rlx "$OUT"
 for f in data/gsm8k_train.jsonl data/gsm8k_test.jsonl rlx/common.py; do [ -f $f ] || { echo "$f missing (python -m rlx.prep)"; exit 1; }; done
