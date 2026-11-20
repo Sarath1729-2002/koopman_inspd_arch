@@ -2,13 +2,18 @@
 *_rdr adds Rollout-Decoded Reconstruction (free-run prior from the context state, decode, MSE to truth).
 *_rdrre = RDR with course correction IN the training rollout: after each imagined step, with prob P_RE the state is
 rebuilt from the decoded observation (h <- init(enc(o_hat)), z <- posterior), gradients flowing through decode/encode,
-so the dynamics learn to continue from re-encoded states."""
+so the dynamics learn to continue from re-encoded states.
+*_rdr10 = RDR with 10-step rollouts from random starts (cheap training; tests whether course correction can stand in
+for long-horizon training).  kae_k10 / kae_k50 = faithful Fathi Koopman autoencoder (wm/kae.py), K-step objective."""
 import argparse, os, time, numpy as np, torch
 from wm.model import RSSM
+from wm.kae import KAE
 
 ARMS = {'gru': ('gru', 'disc', False), 'koop': ('koop', 'disc', False), 'koop_cont': ('koop', 'cont', False),
         'gru_rdr': ('gru', 'disc', True), 'koop_rdr': ('koop', 'disc', True),
-        'gru_rdrre': ('gru', 'disc', 're'), 'koop_rdrre': ('koop', 'disc', 're')}
+        'gru_rdrre': ('gru', 'disc', 're'), 'koop_rdrre': ('koop', 'disc', 're'),
+        'gru_rdr10': ('gru', 'disc', 'r10'), 'koop_rdr10': ('koop', 'disc', 'r10'),
+        'kae_k10': ('kae', None, 10), 'kae_k50': ('kae', None, 50)}
 P_RE = 0.1
 L, CTX = 64, 14  # window: obs[0..64], act[0..63]; filter t<=14, imagine 50 steps
 
@@ -29,20 +34,25 @@ def windows(obs, act, B, rng, Lw=L):
 
 def build(arm, obs_dim, act_dim):
     trans, lat = ARMS[arm][:2]
+    if trans == 'kae':
+        return KAE(obs_dim, act_dim)
     return RSSM(obs_dim, act_dim, trans=trans, latent=lat)
 
 
 def losses(model, o, a, rdr):
+    if isinstance(model, KAE):
+        return model.losses(o, a, rdr)
     hs, zs, dyn, rep, cons = model.observe(o, a)
     rec = (model.decode(hs, zs) - o).pow(2).mean()
     kl = 0.5 * dyn.clamp(min=1.0).mean() + 0.1 * rep.clamp(min=1.0).mean()
     loss = rec + kl + cons.mean()
     out = {'rec': rec.item(), 'kl': dyn.mean().item(), 'cons': cons.mean().item()}
     if rdr:
-        h, z = hs[:, CTX], zs[:, CTX]
+        st, K = (CTX, L - CTX) if rdr != 'r10' else (int(torch.randint(4, L - 10 + 1, (1,))), 10)
+        h, z = hs[:, st], zs[:, st]
         fn = (lambda t, r: torch.rand_like(r) < P_RE) if rdr == 're' else None
-        preds, _ = model.imagine(h, z, a[:, CTX:], fn, 'full')
-        r = (preds - o[:, CTX + 1:]).pow(2).mean()
+        preds, _ = model.imagine(h, z, a[:, st:st + K], fn, 'full')
+        r = (preds - o[:, st + 1:st + K + 1]).pow(2).mean()
         loss = loss + r
         out['rdr'] = r.item()
     return loss, out
