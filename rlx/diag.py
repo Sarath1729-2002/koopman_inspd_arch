@@ -45,43 +45,56 @@ def main():
         for d in (acc, per_group.setdefault(g, {})):
             s = d.setdefault(key, [0.0, 0.0]); s[0] += w * x; s[1] += w
 
+    CH = 8_000_000                                   # columns per chunk (40 x 8M fp32 = 1.3 GB on GPU)
     for n in names:
-        D = torch.stack([p[n].to(dev, torch.float32).reshape(-1) for p in prefix])          # [T, P]
-        if not torch.isfinite(D).all():
-            raise SystemExit(f"non-finite deltas in {n}")
-        E = float((D[-1] ** 2).sum())
+        P = prefix[0][n].numel()
+        chunks = [(i, min(P, i + CH)) for i in range(0, P, CH)]
+        col = lambda t_list, a_, b_: torch.stack([x[n].reshape(-1)[a_:b_].to(dev, torch.float32) for x in t_list])
+        # pass 1: Gram matrix and increment statistics, accumulated over column chunks
+        G = torch.zeros(T, T, dtype=torch.float64, device=dev)
+        E = sum_inc = mu2 = dev2 = 0.0
+        for a_, b_ in chunks:
+            D = col(prefix, a_, b_)
+            if not torch.isfinite(D).all():
+                raise SystemExit(f"non-finite deltas in {n}")
+            G += (D @ D.T).double()
+            E += float((D[-1] ** 2).sum())
+            inc = torch.diff(torch.cat([torch.zeros_like(D[:1]), D]), dim=0)
+            mu = inc.mean(0)
+            sum_inc += float((inc ** 2).sum()); mu2 += float((mu ** 2).sum()); dev2 += float(((inc - mu) ** 2).sum())
+            del D, inc, mu
         if E == 0:
             continue
         g = group(n)
-        G = (D @ D.T).double()
-        ev = torch.linalg.eigvalsh(G + 1e-12 * G.diagonal().mean() * torch.eye(T, dtype=G.dtype, device=G.device)).flip(0).clamp(min=0)
+        Gj = G + 1e-12 * G.diagonal().mean() * torch.eye(T, dtype=G.dtype, device=dev)
+        evc, U = torch.linalg.eigh(Gj)
+        ev = evc.flip(0).clamp(min=0); U = U.flip(1)
         tot = float(ev.sum())
         add("rank1", float(ev[0]) / tot, E, g); add("rank3", float(ev[:3].sum()) / tot, E, g)
-        inc = torch.diff(torch.cat([torch.zeros_like(D[:1]), D]), dim=0)                     # [T, P] increments
-        sum_inc = float((inc ** 2).sum())
-        rho = E / sum_inc
-        add("rho_over_T", rho / T, E, g)
-        mu = inc.mean(0)
-        s_hat = float(((inc - mu) ** 2).sum()) / (T - 1)                 # per-step noise energy (unbiased)
-        m_hat = max(0.0, float((mu ** 2).sum()) - s_hat / T)              # drift energy, noise bias removed
+        add("rho_over_T", (E / sum_inc) / T, E, g)
+        s_hat = dev2 / (T - 1); m_hat = max(0.0, mu2 - s_hat / T)
         add("noise_share", s_hat / max(1e-30, s_hat + m_hat), E, g)
-        # subspace of the prefix (right singular vectors) for future capture
-        evc, U = torch.linalg.eigh(G)
-        U = U.flip(1).to(D.dtype); s = evc.flip(0).clamp(min=1e-30).sqrt().to(D.dtype)
-        V = (D.T @ U[:, :10]) / s[:10]                                                         # [P, 10]
-        V, _ = torch.linalg.qr(V)
-        half = D[-1] - D[T // 2 - 1]
+        r_eff = int(min(10, (ev > ev[0] * 1e-10).sum()))
+        Us = (U[:, :r_eff] / ev[:r_eff].sqrt()).float()          # V = D^T Us is orthonormal [P, r_eff]
+        # pass 2: project the future moves on the prefix subspace, chunk by chunk
         for Ts in targets:
-            F = fut[Ts][n].to(dev, torch.float32).reshape(-1) - D[-1]
-            fe = float((F ** 2).sum())
+            proj = torch.zeros(r_eff, dtype=torch.float64, device=dev)
+            fe = dot = hn = 0.0
+            for a_, b_ in chunks:
+                D = col(prefix, a_, b_)
+                F = fut[Ts][n].reshape(-1)[a_:b_].to(dev, torch.float32) - D[-1]
+                half = D[-1] - D[T // 2 - 1]
+                proj += ((D.T @ Us).T @ F).double()
+                fe += float((F ** 2).sum()); dot += float((half * F).sum()); hn += float((half ** 2).sum())
+                del D, F, half
             if fe == 0:
                 continue
             for r in (1, 3, 10):
-                cap = float(((V[:, :r].T @ F) ** 2).sum()) / fe
+                cap = min(1.0, float((proj[:min(r, r_eff)] ** 2).sum()) / fe)
                 add(f"capture{r}@{Ts}", cap, fe, g)
                 add(f"oracle_werr{r}@{Ts}", math.sqrt(max(0.0, 1 - cap)), fe, g)
-            add(f"dir_cos@{Ts}", float(torch.nn.functional.cosine_similarity(half, F, dim=0)), fe, g)
-        del D, inc, G
+            add(f"dir_cos@{Ts}", dot / max(1e-30, math.sqrt(hn * fe)), fe, g)
+        del G
     mean = lambda d, k: d[k][0] / d[k][1] if k in d and d[k][1] > 0 else float("nan")
     res = {k: mean(acc, k) for k in acc}
     res["per_group"] = {g: {k: mean(d, k) for k in d} for g, d in per_group.items()}
