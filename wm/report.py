@@ -10,7 +10,8 @@ PASS = K1 and K2 and K3.  Secondary: GRU generality, discrete vs continuous late
 import json, glob, os, sys
 
 out = sys.argv[1] if len(sys.argv) > 1 else 'results_wm'
-R = {os.path.basename(f)[5:-5]: json.load(open(f)) for f in sorted(glob.glob(f'{out}/eval_*.json'))}
+R = {os.path.basename(f)[5:-5]: json.load(open(f)) for f in sorted(glob.glob(f'{out}/eval_*.json'))
+     if '_' not in os.path.basename(f)[5:-5]}
 envs = sorted(R)
 lines = ['# Course-correcting re-encoding in a Dreamer-style world model (MuJoCo, open-loop 50 steps)', '',
          'MSE in standardized observation units; columns = imagined steps 1-10 / 11-25 / 26-50. '

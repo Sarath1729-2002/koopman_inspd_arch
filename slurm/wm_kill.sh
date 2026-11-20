@@ -11,7 +11,7 @@
 #SBATCH --output=logs/%x-%j.out
 set -uo pipefail
 cd "$SLURM_SUBMIT_DIR"
-module load gcc arrow python/3.11 cuda
+module load gcc arrow python/3.11 cuda mujoco/3.3.0
 source "${WM_VENV:-$HOME/venvs/ouro}/bin/activate"
 export PYTHONPATH=".${PYTHONPATH:+:$PYTHONPATH}" PYTHONWARNINGS=ignore MUJOCO_GL=disable
 STEPS="${STEPS:-10000}"; mkdir -p logs/wm
