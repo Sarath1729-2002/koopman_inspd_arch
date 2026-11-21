@@ -37,7 +37,7 @@ class KAE(nn.Module):
         zero = obs.new_zeros(obs.shape[0], max(L - 1, 1))
         return hs, s._z(hs), zero, zero, zero
 
-    def imagine(s, h, z, acts, reenc_mask_fn=None, kind='full'):
+    def imagine(s, h, z, acts, reenc_mask_fn=None, kind='full', score_fn=None):
         preds, n_re = [], torch.zeros(h.shape[0], device=h.device)
         for t in range(acts.shape[1]):
             h = s.trans(h, acts[:, t])
@@ -45,7 +45,7 @@ class KAE(nn.Module):
             preds.append(o)
             if reenc_mask_fn is not None:
                 h_new = s.phi(o)
-                resid = (h_new - h).norm(dim=-1) / (h.norm(dim=-1) + 1e-6)
+                resid = (h_new - h).norm(dim=-1) / (h.norm(dim=-1) + 1e-6) if score_fn is None else score_fn(h)
                 msk = reenc_mask_fn(t, resid)
                 if msk is not None and msk.any():
                     mf = msk.float().unsqueeze(-1)
@@ -63,6 +63,8 @@ class KAE(nn.Module):
         pred, lin = 0.0, 0.0
         for k in range(1, K + 1):
             h = s.trans(h, a[:, st + k - 1])
+            if getattr(s, 'noise', 0) > 0:   # noise injection baseline
+                h = h + s.noise * h.detach().std() * torch.randn_like(h)
             pred = pred + (s.psi(h) - o[:, st + k]).pow(2).mean()
             lin = lin + (h - z_all[:, st + k]).pow(2).mean()
         pred, lin = pred / K, lin / K

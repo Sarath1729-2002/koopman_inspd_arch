@@ -114,13 +114,15 @@ class RSSM(nn.Module):
         return torch.stack(hs, 1), torch.stack(zs, 1), torch.stack(dyn, 1), torch.stack(rep, 1), \
             (torch.stack(cons, 1) if cons else torch.zeros(1, device=obs.device))
 
-    def imagine(s, h, z, acts, reenc_mask_fn=None, kind='full'):
+    def imagine(s, h, z, acts, reenc_mask_fn=None, kind='full', score_fn=None):
         """Open-loop prior rollout (mode latents) with true actions acts [B,H,A].
         reenc_mask_fn(t, h, z, o_hat, resid) -> bool [B] : where to re-encode after step t.
         Returns decoded predictions [B,H,O] and #re-encodes [B]."""
         preds, n_re = [], torch.zeros(h.shape[0], device=h.device)
         for t in range(acts.shape[1]):
             h = s.step(h, z, acts[:, t])
+            if s.training and getattr(s, 'noise', 0) > 0:   # noise injection baseline (training only)
+                h = h + s.noise * h.detach().std() * torch.randn_like(h)
             z = s.sample(s.dist(s.prior(h)), mode=True)
             o = s.decode(h, z)
             preds.append(o)
@@ -133,6 +135,8 @@ class RSSM(nn.Module):
                     h_new = h
                     z_new = s.sample(s.dist(s.post(torch.cat([h, e], -1))), mode=True)
                     resid = (z_new - z).abs().sum(-1) / 2 / (s.C if s.latent == 'disc' else 1)
+                if score_fn is not None:
+                    resid = score_fn(h)
                 m = reenc_mask_fn(t, resid)
                 if m is not None and m.any():
                     mf = m.float().unsqueeze(-1)

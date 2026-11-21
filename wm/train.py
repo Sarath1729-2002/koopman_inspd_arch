@@ -13,7 +13,13 @@ ARMS = {'gru': ('gru', 'disc', False), 'koop': ('koop', 'disc', False), 'koop_co
         'gru_rdr': ('gru', 'disc', True), 'koop_rdr': ('koop', 'disc', True),
         'gru_rdrre': ('gru', 'disc', 're'), 'koop_rdrre': ('koop', 'disc', 're'),
         'gru_rdr10': ('gru', 'disc', 'r10'), 'koop_rdr10': ('koop', 'disc', 'r10'),
-        'kae_k10': ('kae', None, 10), 'kae_k50': ('kae', None, 50)}
+        'kae_k10': ('kae', None, 10), 'kae_k50': ('kae', None, 50),
+        # SHORT-DATA regime: training only ever sees 16-step segments (episodes chopped at multiples of 16),
+        # so no model can be trained on rollouts longer than 16 steps.  *_n = noise injection during rollouts.
+        'kae_s10': ('kae', None, 10), 'gru_s10': ('gru', 'disc', 'r10'), 'koop_s10': ('koop', 'disc', 'r10'),
+        'kae_s10n': ('kae', None, 10), 'gru_s10n': ('gru', 'disc', 'r10'), 'koop_s10n': ('koop', 'disc', 'r10')}
+SEG = 16          # short-data segment length (transitions)
+NOISE = 0.1       # noise-injection scale (fraction of state std) for *_n arms
 P_RE = 0.1
 L, CTX = 64, 14  # window: obs[0..64], act[0..63]; filter t<=14, imagine 50 steps
 
@@ -25,6 +31,14 @@ def load(env, root='data_wm'):
     return nz(d['obs_train']), d['act_train'], nz(d['obs_test']), d['act_test']
 
 
+def seg_windows(obs, act, B, rng):
+    """Windows that never cross a 16-step segment boundary (the short-data regime)."""
+    i = rng.integers(0, obs.shape[0], B)
+    t = SEG * rng.integers(0, (obs.shape[1] - 1) // SEG, B)
+    ar = np.arange(SEG + 1)
+    return obs[i[:, None], t[:, None] + ar], act[i[:, None], t[:, None] + ar[:-1]]
+
+
 def windows(obs, act, B, rng, Lw=L):
     i = rng.integers(0, obs.shape[0], B)
     t = rng.integers(0, obs.shape[1] - Lw - 1 + 1, B)
@@ -34,9 +48,9 @@ def windows(obs, act, B, rng, Lw=L):
 
 def build(arm, obs_dim, act_dim):
     trans, lat = ARMS[arm][:2]
-    if trans == 'kae':
-        return KAE(obs_dim, act_dim)
-    return RSSM(obs_dim, act_dim, trans=trans, latent=lat)
+    m = KAE(obs_dim, act_dim) if trans == 'kae' else RSSM(obs_dim, act_dim, trans=trans, latent=lat)
+    m.noise = NOISE if arm.endswith('_s10n') else 0.0
+    return m
 
 
 def losses(model, o, a, rdr):
@@ -48,7 +62,8 @@ def losses(model, o, a, rdr):
     loss = rec + kl + cons.mean()
     out = {'rec': rec.item(), 'kl': dyn.mean().item(), 'cons': cons.mean().item()}
     if rdr:
-        st, K = (CTX, L - CTX) if rdr != 'r10' else (int(torch.randint(4, L - 10 + 1, (1,))), 10)
+        Lo = o.shape[1] - 1
+        st, K = (CTX, Lo - CTX) if rdr != 'r10' else (int(torch.randint(4, Lo - 10 + 1, (1,))), 10)
         h, z = hs[:, st], zs[:, st]
         fn = (lambda t, r: torch.rand_like(r) < P_RE) if rdr == 're' else None
         preds, _ = model.imagine(h, z, a[:, st:st + K], fn, 'full')
@@ -78,7 +93,7 @@ if __name__ == '__main__':
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda i: min(1.0, (i + 1) / 500))
     t0 = time.time(); tag = f'[{a.env} {a.arm} s{a.seed}]'
     for it in range(a.steps):
-        o, ac = windows(otr, atr, a.batch, rng)
+        o, ac = (seg_windows if '_s10' in a.arm else windows)(otr, atr, a.batch, rng)
         o, ac = torch.from_numpy(o).to(dev), torch.from_numpy(ac).to(dev)
         loss, info = losses(model, o, ac, ARMS[a.arm][2])
         if not torch.isfinite(loss):
