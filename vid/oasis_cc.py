@@ -49,6 +49,41 @@ def find(oasis_dir, stems):
     raise FileNotFoundError(f'none of {stems} in {oasis_dir}')
 
 
+def code_root(oasis_dir):
+    """Find dit.py and vae.py anywhere under oasis_dir (mirrors nest them differently); put their dirs (and package
+    parents) on sys.path. Returns the dir holding dit.py."""
+    found = {}
+    for root, dirs, files in os.walk(oasis_dir):
+        for f in ('dit.py', 'vae.py'):
+            if f in files and f not in found:
+                found[f] = root
+    if 'dit.py' not in found or 'vae.py' not in found:
+        listing = sorted(os.path.relpath(os.path.join(r, f), oasis_dir) for r, _, fs in os.walk(oasis_dir) for f in fs
+                         if f.endswith('.py'))[:60]
+        raise FileNotFoundError(f'need dit.py AND vae.py under {oasis_dir}; found {found}; .py files: {listing}')
+    for d in set(found.values()):
+        for p in (d, os.path.dirname(d)):
+            if p not in sys.path:
+                sys.path.insert(0, p)
+    return found['dit.py']
+
+
+def find_file(oasis_dir, name):
+    for root, _, files in os.walk(oasis_dir):
+        if name in files:
+            return os.path.join(root, name)
+    raise FileNotFoundError(name)
+
+
+def import_mod(name, d):
+    """import dit / vae either as top-level modules or as part of a package directory."""
+    import importlib
+    try:
+        return importlib.import_module(name)
+    except ImportError:
+        return importlib.import_module(f'{os.path.basename(d)}.{name}')
+
+
 def sigmoid_beta_schedule(T, start=-3, end=3, tau=1, clamp_min=1e-5):
     t = torch.linspace(0, T, T + 1, dtype=torch.float64) / T
     v_start, v_end = torch.tensor(start / tau).sigmoid(), torch.tensor(end / tau).sigmoid()
@@ -60,9 +95,10 @@ def sigmoid_beta_schedule(T, start=-3, end=3, tau=1, clamp_min=1e-5):
 
 class Oasis:
     def __init__(s, oasis_dir, dev):
-        sys.path.insert(0, oasis_dir)
-        from dit import DiT_models
-        from vae import VAE_models
+        code_dir = code_root(oasis_dir)
+        print('Oasis code dir:', code_dir, flush=True)
+        DiT_models = import_mod('dit', code_dir).DiT_models
+        VAE_models = import_mod('vae', os.path.dirname(find_file(oasis_dir, 'vae.py'))).VAE_models
         s.dev = dev
         s.model = DiT_models['DiT-S/2']()
         missing = s.model.load_state_dict(load_state(find(oasis_dir, ['oasis500m'])), strict=False)
@@ -70,11 +106,7 @@ class Oasis:
         s.vae = VAE_models['vit-l-20-shallow-encoder']()
         s.vae.load_state_dict(load_state(find(oasis_dir, ['vit-l-20'])))
         s.model, s.vae = s.model.to(dev).eval(), s.vae.to(dev).eval()
-        try:
-            from utils import sigmoid_beta_schedule as sbs
-            betas = sbs(MAX_NOISE)
-        except Exception:
-            betas = sigmoid_beta_schedule(MAX_NOISE)
+        betas = sigmoid_beta_schedule(MAX_NOISE)   # same schedule as Oasis utils.py (own copy: no import clash)
         s.ac = rearrange(torch.cumprod(1.0 - betas.float().to(dev), 0), 'T -> T 1 1 1')
         s.max_frames = getattr(s.model, 'max_frames', 32)
         s.patch = s.vae.patch_size
@@ -165,7 +197,9 @@ def write_mp4(path, frames_u8, fps=20):
             c.mux(pk)
 
 
-def load_actions(path, offset, n):
+def load_actions(path, offset, n, A=25):
+    if path is None:
+        return torch.zeros(n, A)
     a = torch.load(path, map_location='cpu', weights_only=False)
     a = torch.as_tensor(a).float()
     if a.dim() == 3:
@@ -233,15 +267,19 @@ if __name__ == '__main__':
         print('exists', f_out); raise SystemExit
     torch.manual_seed(0)
     O = Oasis(a.oasis_dir, dev)
-    vids = sorted(glob.glob(os.path.join(a.oasis_dir, 'sample_data', '*.mp4')))
-    acts = sorted(glob.glob(os.path.join(a.oasis_dir, 'sample_data', '*.one_hot_actions.pt')))
-    assert vids and acts, 'sample_data videos/actions not found'
+    vids = sorted(glob.glob(os.path.join(a.oasis_dir, '**', '*.mp4'), recursive=True))
+    acts = sorted(glob.glob(os.path.join(a.oasis_dir, '**', '*.one_hot_actions.pt'), recursive=True))
+    vids = [v for v in vids if not os.path.basename(v).startswith(('video', 'out'))]   # skip generated outputs
+    print('videos', [os.path.basename(v) for v in vids][:5], 'actions', [os.path.basename(x) for x in acts][:5], flush=True)
+    assert vids, 'no .mp4 prompt videos found under oasis_dir'
     pairs = []
     for v in vids:
         stem = os.path.basename(v).replace('.mp4', '')
-        match = [x for x in acts if os.path.basename(x).startswith(stem.replace('video', 'actions'))] or \
-                [x for x in acts if stem.split('_')[-1] in os.path.basename(x)] or acts[:1]
+        match = [x for x in acts if os.path.basename(x).startswith(stem)] or \
+                [x for x in acts if os.path.basename(x).startswith(stem.replace('video', 'actions'))] or acts[:1] or [None]
         pairs.append((v, match[0]))
+    if pairs[0][1] is None:
+        print('!! no action file found: using all-zero (no-op) actions for every arm', flush=True)
     real = read_frames(pairs[0][0])
     print('video', pairs[0], 'frames', tuple(real.shape), flush=True)
     offsets = [int(x) for x in a.offsets.split(',')]
