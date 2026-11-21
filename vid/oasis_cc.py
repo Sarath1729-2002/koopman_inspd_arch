@@ -18,15 +18,17 @@ MAX_NOISE = 1000
 
 
 def arm_cfg(arm):
-    stab, P = 15, 0
-    if arm.startswith('stab'):
-        stab = int(arm[4:])
-    if arm.startswith('reenc'):
-        parts = arm.split('_')
-        P = int(parts[0][5:])
-        if len(parts) > 1:
-            stab = int(parts[1][4:])
-    return stab, P
+    """base | stabN | reencP[_stabN] | reencP_mm | mm | evtK (re-encode a frame when its shift > K x real floor)
+    | partA (every frame z <- z + 0.A (E(D(z)) - z))"""
+    c = dict(stab=15, P=0, evt=0.0, alpha=1.0, mm=False)
+    parts = arm.split('_')
+    for q in parts:
+        if q.startswith('stab'): c['stab'] = int(q[4:])
+        elif q.startswith('reenc'): c['P'] = int(q[5:])
+        elif q.startswith('evt'): c['evt'] = float(q[3:])
+        elif q.startswith('part'): c['P'], c['alpha'] = 1, float('0.' + q[4:])
+        elif q == 'mm': c['mm'] = True
+    return c
 
 
 def load_state(path):
@@ -132,9 +134,16 @@ class Oasis:
         return s.encode(s.decode(z))
 
     @torch.no_grad()
-    def rollout(s, x, actions, frames, stab, P, ddim_steps=10, log_every=64):
-        """x: prompt latents [B, n_p, c, h, w]; actions [B, frames, A]. Returns latents [B, frames, c, h, w], shift [B, frames]."""
+    def rollout(s, x, actions, frames, cfg, floor=0.0, ref_mu=None, ref_sd=None, ddim_steps=10, log_every=64):
+        """x: prompt latents [B, n_p, c, h, w]; actions [B, frames, A].
+        Returns latents [B, frames, c, h, w], shift [B, frames], number of re-encoded frames per sample [B]."""
+        stab, P = cfg['stab'], cfg['P']
         B, n_p = x.shape[:2]
+        n_re = torch.zeros(B, device=s.dev)
+
+        def mm(zz):  # match per-channel latent mean/std (over h, w) to real-frame latent statistics
+            mu, sd = zz.mean((-2, -1), keepdim=True), zz.std((-2, -1), keepdim=True) + 1e-6
+            return (zz - mu) / sd * ref_sd.view(1, -1, 1, 1) + ref_mu.view(1, -1, 1, 1)
         noise_range = torch.linspace(-1, MAX_NOISE - 1, ddim_steps + 1).long()
         shift = torch.zeros(B, frames, device=s.dev)
         t0 = time.time()
@@ -164,13 +173,23 @@ class Oasis:
             z = x[:, -1]
             zr = s.reencode(z)
             shift[:, i] = (zr - z).pow(2).flatten(1).sum(1) / z.pow(2).flatten(1).sum(1)
-            if P and (i - n_p + 1) % P == 0:
+            if cfg['evt'] > 0:
+                m = shift[:, i] > cfg['evt'] * floor
+                if m.any():
+                    x[m, -1] = zr[m]; n_re += m.float()
+            elif P and (i - n_p + 1) % P == 0:
                 k = min(P, i - n_p + 1)
-                x[:, -k:] = zr.unsqueeze(1) if k == 1 else rearrange(
-                    s.reencode(rearrange(x[:, -k:], 'b k c h w -> (b k) c h w')), '(b k) c h w -> b k c h w', b=B)
+                if k == 1:
+                    x[:, -1] = z + cfg['alpha'] * (zr - z)
+                else:
+                    x[:, -k:] = rearrange(s.reencode(rearrange(x[:, -k:], 'b k c h w -> (b k) c h w')),
+                                          '(b k) c h w -> b k c h w', b=B)
+                n_re += k
+            if cfg['mm']:
+                x[:, -1] = mm(x[:, -1])
             if (i + 1) % log_every == 0:
                 print(f'  frame {i + 1}/{frames}  shift {shift[:, i].mean():.4f}  ({time.time() - t0:.0f}s)', flush=True)
-        return x, shift
+        return x, shift, n_re
 
 
 # ------------------------------------------------------------------ data + metrics
@@ -270,12 +289,14 @@ if __name__ == '__main__':
     ap.add_argument('--arm', default='base')
     ap.add_argument('--frames', type=int, default=512)
     ap.add_argument('--offsets', default='100,300,500,700')
+    ap.add_argument('--video_idx', type=int, default=-1, help='which sample video gives prompts/actions (-1: first, old naming)')
     ap.add_argument('--out', default='results_vid')
     ap.add_argument('--selftest', action='store_true', help='3 frames, 1 prompt: checks the whole pipeline')
     a = ap.parse_args()
     dev = 'cuda' if torch.cuda.is_available() else 'cpu'
     os.makedirs(a.out, exist_ok=True)
-    f_out = f'{a.out}/{a.arm}.json'
+    tag = a.arm if a.video_idx < 0 else f'{a.arm}_v{a.video_idx}'
+    f_out = f'{a.out}/{tag}.json'
     if os.path.exists(f_out) and not a.selftest:
         print('exists', f_out); raise SystemExit
     torch.manual_seed(0)
@@ -295,21 +316,27 @@ if __name__ == '__main__':
         pairs.append((v, match[0]))
     if pairs[0][1] is None:
         print('!! no action file found: using all-zero (no-op) actions for every arm', flush=True)
-    real = read_frames(pairs[0][0])
-    print('video', pairs[0], 'frames', tuple(real.shape), flush=True)
+    vi = max(a.video_idx, 0)
+    real = read_frames(pairs[vi][0])
+    print('video', pairs[vi], 'frames', tuple(real.shape), flush=True)
+    # real reference (pooled over all sample videos): VAE re-encode floor and per-channel latent stats
+    ref = torch.cat([read_frames(v)[::2] for v, _ in pairs])[:1200].to(dev)
+    zr = O.encode(ref[:256])
+    floor = ((O.reencode(zr) - zr).pow(2).flatten(1).sum(1) / zr.pow(2).flatten(1).sum(1)).mean().item()
+    ref_mu, ref_sd = zr.mean((0, 2, 3)), zr.std((0, 2, 3))
     offsets = [int(x) for x in a.offsets.split(',')]
     frames = 3 if a.selftest else a.frames
     if a.selftest:
         offsets = offsets[:1]
     offsets = [min(o_, real.shape[0] - 1) for o_ in offsets]
     prompts = torch.stack([real[o_] for o_ in offsets]).to(dev)                       # [B,3,H,W]
-    actions = torch.stack([load_actions(pairs[0][1], o_, frames) for o_ in offsets]).to(dev)
+    actions = torch.stack([load_actions(pairs[vi][1], o_, frames) for o_ in offsets]).to(dev)
     x0 = O.encode(prompts).unsqueeze(1)                                                # [B,1,c,h,w]
-    stab, P = arm_cfg(a.arm)
-    print(f'arm {a.arm}: stabilization {stab}, re-encode every {P}  B={len(offsets)} frames={frames} '
+    cfg = arm_cfg(a.arm); stab, P = cfg['stab'], cfg['P']
+    print(f'arm {a.arm}: {cfg}  real floor {floor:.4f}  B={len(offsets)} frames={frames} '
           f'latent {tuple(x0.shape)} max_frames {O.max_frames}', flush=True)
     t0 = time.time()
-    lat, shift = O.rollout(x0, actions, frames, stab, P)
+    lat, shift, n_re = O.rollout(x0, actions, frames, cfg, floor, ref_mu, ref_sd)
     print(f'rollout done in {time.time() - t0:.0f}s', flush=True)
     B = lat.shape[0]
     imgs = O.decode(rearrange(lat, 'b t c h w -> (b t) c h w'))
@@ -320,9 +347,7 @@ if __name__ == '__main__':
     net = resnet(dev, allow_random=a.selftest or os.environ.get('VID_ALLOW_RANDOM') == '1')
     F_gen = feats(net, imgs).cpu().numpy().reshape(B, frames, -1)
     # real reference: all frames of the sample videos (subsampled), their stats, and the VAE re-encode floor
-    ref = torch.cat([read_frames(v)[::2] for v, _ in pairs])[:1200].to(dev)
     F_ref = feats(net, ref).cpu().numpy()
-    zr = O.encode(ref[:256]); floor = ((O.reencode(zr) - zr).pow(2).flatten(1).sum(1) / zr.pow(2).flatten(1).sum(1)).mean().item()
     st_ref = {k: float(v.mean()) for k, v in img_stats(ref).items()}
     lat_ref = {'mean': float(zr.mean()), 'std': float(zr.std())}
     from sklearn.decomposition import PCA
@@ -333,7 +358,8 @@ if __name__ == '__main__':
         G = F_gen[:, b0:b0 + 64].reshape(-1, F_gen.shape[-1])
         if G.shape[0] >= 32:
             bins.append(b0); fd.append(frechet(pca.transform(G), R64))
-    res = {'arm': a.arm, 'stab': stab, 'P': P, 'frames': frames, 'offsets': offsets, 'shift_floor_real': floor,
+    res = {'arm': a.arm, 'video_idx': vi, 'video': os.path.basename(pairs[vi][0]), 'cfg': cfg,
+           'n_reenc': n_re.cpu().numpy().tolist(), 'stab': stab, 'P': P, 'frames': frames, 'offsets': offsets, 'shift_floor_real': floor,
            'ref': {**st_ref, 'lat': lat_ref}, 'shift': shift.cpu().numpy().tolist(),
            'bright': st['bright'].tolist(), 'sat': st['sat'].tolist(), 'sharp': st['sharp'].tolist(),
            'lat_mean': lat_mean.tolist(), 'lat_std': lat_std.tolist(), 'change': change.tolist(),
@@ -345,9 +371,9 @@ if __name__ == '__main__':
     json.dump(res, open(f_out + '.tmp', 'w')); os.replace(f_out + '.tmp', f_out)
     try:
         v = (imgs.view(B, frames, *imgs.shape[1:])[0].permute(0, 2, 3, 1).cpu() * 255).byte()
-        write_mp4(f'{a.out}/{a.arm}.mp4', v)
+        write_mp4(f'{a.out}/{tag}.mp4', v)
     except Exception as e:
         print('video write failed:', e)
-    print(f'[{a.arm}] shift first/last bin {np.mean(res["shift"], 0)[1:65].mean():.4f} / {np.mean(res["shift"], 0)[-64:].mean():.4f} '
+    print(f'[{tag}] re-encodes/sample {n_re.mean().item():.0f}  shift first/last bin {np.mean(res["shift"], 0)[1:65].mean():.4f} / {np.mean(res["shift"], 0)[-64:].mean():.4f} '
           f'(real floor {floor:.4f})  FD first/last {fd[0]:.1f} / {fd[-1]:.1f}  bright last/ref '
           f'{st["bright"][:, -64:].mean() / st_ref["bright"]:.2f}', flush=True)
