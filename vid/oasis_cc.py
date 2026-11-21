@@ -197,10 +197,23 @@ def write_mp4(path, frames_u8, fps=20):
             c.mux(pk)
 
 
+ACT_ROOT = [None]
+
+
+def oasis_one_hot(raw):
+    """Original Oasis release stores actions as a list of dicts; convert with its own utils.one_hot_actions."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('oasis_utils', find_file(ACT_ROOT[0], 'utils.py'))
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    return mod.one_hot_actions(raw)
+
+
 def load_actions(path, offset, n, A=25):
     if path is None:
         return torch.zeros(n, A)
     a = torch.load(path, map_location='cpu', weights_only=False)
+    if isinstance(a, (list, tuple)) and len(a) and isinstance(a[0], dict):
+        a = oasis_one_hot(a)
     a = torch.as_tensor(a).float()
     if a.dim() == 3:
         a = a[0]
@@ -268,7 +281,9 @@ if __name__ == '__main__':
     torch.manual_seed(0)
     O = Oasis(a.oasis_dir, dev)
     vids = sorted(glob.glob(os.path.join(a.oasis_dir, '**', '*.mp4'), recursive=True))
-    acts = sorted(glob.glob(os.path.join(a.oasis_dir, '**', '*.one_hot_actions.pt'), recursive=True))
+    acts = sorted(glob.glob(os.path.join(a.oasis_dir, '**', '*.one_hot_actions.pt'), recursive=True) +
+                  glob.glob(os.path.join(a.oasis_dir, '**', '*.actions.pt'), recursive=True))
+    ACT_ROOT[0] = a.oasis_dir
     vids = [v for v in vids if not os.path.basename(v).startswith(('video', 'out'))]   # skip generated outputs
     print('videos', [os.path.basename(v) for v in vids][:5], 'actions', [os.path.basename(x) for x in acts][:5], flush=True)
     assert vids, 'no .mp4 prompt videos found under oasis_dir'
