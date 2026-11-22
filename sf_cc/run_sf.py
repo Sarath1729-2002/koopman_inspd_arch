@@ -36,8 +36,41 @@ def write_mp4(path, frames_u8, fps=16):
     os.replace(path + '.tmp.mp4', path)
 
 
+def sdpa_flash_attention(q, k, v, q_lens=None, k_lens=None, dropout_p=0., softmax_scale=None, q_scale=None,
+                         causal=False, window_size=(-1, -1), deterministic=False, dtype=torch.bfloat16, version=None):
+    """Drop-in for wan.modules.attention.flash_attention using PyTorch SDPA (q, k, v: [B, L, heads, dim]).
+    Honours k_lens (key padding) and q_scale; returns [B, Lq, heads, dim] in q's dtype."""
+    out_dtype = q.dtype
+    cast = (lambda t: t if t.dtype in (torch.float16, torch.bfloat16) else t.to(dtype))
+    q, k, v = cast(q), cast(k), cast(v)
+    if q_scale is not None:
+        q = q * q_scale
+    mask = None
+    if k_lens is not None:
+        Lk = k.shape[1]
+        mask = (torch.arange(Lk, device=k.device)[None, :] < k_lens.to(k.device)[:, None])[:, None, None, :]
+    o = torch.nn.functional.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
+                                                         attn_mask=mask, dropout_p=dropout_p, is_causal=causal,
+                                                         scale=softmax_scale)
+    return o.transpose(1, 2).contiguous().to(out_dtype)
+
+
+def patch_flash_attention():
+    """flash-attn wheels on the cluster do not match this torch; Wan's cross-attention calls flash_attention directly."""
+    import wan.modules.attention as A
+    if A.FLASH_ATTN_2_AVAILABLE or A.FLASH_ATTN_3_AVAILABLE:
+        return
+    import wan.modules.model  # noqa: F401  (load the modules that imported the name)
+    n = 0
+    for name, mod in list(sys.modules.items()):
+        if name.startswith('wan') and getattr(mod, 'flash_attention', None) is not None:
+            mod.flash_attention = sdpa_flash_attention; n += 1
+    print(f'flash-attn unavailable: patched flash_attention -> PyTorch SDPA in {n} modules', flush=True)
+
+
 def build(sink, local=21):
     sys.path.insert(0, SF); os.chdir(SF)
+    patch_flash_attention()
     from omegaconf import OmegaConf
     from pipeline import CausalInferencePipeline
     cfg = OmegaConf.merge(OmegaConf.load('configs/default_config.yaml'), OmegaConf.load('configs/self_forcing_dmd.yaml'))
