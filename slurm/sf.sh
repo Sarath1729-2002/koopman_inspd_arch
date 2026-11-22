@@ -19,16 +19,18 @@ PROMPTS="${PROMPTS:-0-31}"; LAT="${LAT:-240}"; OUT=results_sf
 ARMS="${ARMS:-base reenc1 noise1 sink3 sink3_reenc1 reenc2}"
 mkdir -p logs/sf $OUT
 echo "===== $(date '+%F %T') node $(hostname)"; nvidia-smi -L
-CUDA_VISIBLE_DEVICES=0 python -m sf_cc.run_sf --arm reenc1 --smoke --out results_sf_smoke > logs/sf/smoke.log 2>&1
-grep -q "SMOKE OK" logs/sf/smoke.log || { echo "SMOKE FAILED"; tail -40 logs/sf/smoke.log; exit 1; }
-grep "generator load\|^\[" logs/sf/smoke.log
+NG=$(nvidia-smi -L | wc -l); NL=$((2 * NG))
+SM=""; for a in $ARMS; do [[ $a == *reenc* ]] && { SM=$a; break; }; done; SM=${SM:-${ARMS%% *}}
+CUDA_VISIBLE_DEVICES=0 python -m sf_cc.run_sf --arm $SM --smoke --out results_sf_smoke > logs/sf/smoke_${SLURM_JOB_ID:-0}.log 2>&1
+grep -q "SMOKE OK" logs/sf/smoke_${SLURM_JOB_ID:-0}.log || { echo "SMOKE FAILED"; tail -40 logs/sf/smoke_${SLURM_JOB_ID:-0}.log; exit 1; }
+grep "checkpoint\|generator load\|^\[" logs/sf/smoke_${SLURM_JOB_ID:-0}.log
 lo=${PROMPTS%-*}; hi=${PROMPTS#*-}; mid=$(( (lo + hi) / 2 ))
 JOBS=()
 for arm in $ARMS; do JOBS+=("$arm:$lo-$mid" "$arm:$((mid + 1))-$hi"); done
 # 2 lanes per GPU (each process ~30 GB), lanes run their share of jobs sequentially
-for lane in 0 1 2 3 4 5 6 7; do
-  g=$((lane % 4))
-  ( for ((k = lane; k < ${#JOBS[@]}; k += 8)); do
+for ((lane = 0; lane < NL; lane++)); do
+  g=$((lane % NG))
+  ( for ((k = lane; k < ${#JOBS[@]}; k += NL)); do
       arm=${JOBS[$k]%:*}; pr=${JOBS[$k]#*:}
       CUDA_VISIBLE_DEVICES=$g python -m sf_cc.run_sf --arm $arm --prompts $pr --latents $LAT --out $OUT \
         > logs/sf/${arm}_${pr}.log 2>&1 || { echo "[sf] $arm $pr FAILED (exit $?)"; grep -v Warning logs/sf/${arm}_${pr}.log | tail -8; }
@@ -39,7 +41,7 @@ grep -h "^\[" logs/sf/*.log | tail -20
 echo "===== $(date '+%F %T') generation done: $(ls $OUT/*/*.mp4 | wc -l) videos"
 g=0
 for arm in $ARMS; do   # metrics skip videos already scored
-  CUDA_VISIBLE_DEVICES=$((g % 4)) python -m sf_cc.metrics --root $OUT --arms $arm > logs/sf/metrics_$arm.log 2>&1 &
+  CUDA_VISIBLE_DEVICES=$((g % NG)) python -m sf_cc.metrics --root $OUT --arms $arm > logs/sf/metrics_$arm.log 2>&1 &
   g=$((g + 1))
 done
 wait

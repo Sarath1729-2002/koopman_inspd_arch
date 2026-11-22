@@ -6,6 +6,8 @@ Arms (name tokens joined by '_'):
   reencP        every P chunks: chunk latents z <- E(D([previous W latents, z]))[-3:]   (the projection)
   noiseP        control: z <- z + eps, |eps| = |E(D(.)) - z| per sample (same size, random direction)
   sinkK         attention sink: keep the first K latent frames in the cache (StreamingLLM / Deep-Forcing-style baseline)
+  ode           use checkpoints/ode_init.pt: the SAME causal 4-step student BEFORE Self-Forcing's self-rollout (DMD)
+                training, i.e. a model never trained on its own outputs (tests: does correction substitute for that?)
 Per video we save the mp4 (16 fps) and a json with per-chunk drift signal ||E(D(z)) - z||^2 / ||z||^2 and timings.
 Run from the repo root:  python -m sf_cc.run_sf --arm reenc1 --prompts 0-31 --latents 240"""
 import argparse, json, os, sys, time, numpy as np, torch
@@ -14,11 +16,12 @@ SF = os.path.abspath(os.environ.get('SF_DIR', 'ext/Self-Forcing'))
 
 
 def arm_cfg(arm):
-    c = dict(P=0, noise=False, sink=0)
+    c = dict(P=0, noise=False, sink=0, ckpt='dmd')
     for q in arm.split('_'):
         if q.startswith('reenc'): c['P'] = int(q[5:])
         elif q.startswith('noise'): c['P'], c['noise'] = int(q[5:]), True
         elif q.startswith('sink'): c['sink'] = int(q[4:])
+        elif q == 'ode': c['ckpt'] = 'ode'
     return c
 
 
@@ -97,7 +100,7 @@ class StreamVAE:
         return ((mu - mean) / std).permute(0, 2, 1, 3, 4)
 
 
-def build(sink, local=21):
+def build(sink, local=21, ckpt='dmd'):
     sys.path.insert(0, SF); os.chdir(SF)
     patch_flash_attention()
     from omegaconf import OmegaConf
@@ -106,8 +109,11 @@ def build(sink, local=21):
     cfg.model_kwargs.local_attn_size = local
     cfg.model_kwargs.sink_size = sink
     pipe = CausalInferencePipeline(cfg, device='cuda')
-    sd = torch.load('checkpoints/self_forcing_dmd.pt', map_location='cpu')
-    missing = pipe.generator.load_state_dict(sd['generator_ema'])
+    f = {'dmd': 'checkpoints/self_forcing_dmd.pt', 'ode': 'checkpoints/ode_init.pt'}[ckpt]
+    sd = torch.load(f, map_location='cpu')
+    key = next((k for k in ('generator_ema', 'generator') if k in sd), None)
+    print(f'checkpoint {f} key {key}', flush=True)
+    missing = pipe.generator.load_state_dict(sd[key] if key else sd)
     print('generator load:', missing, flush=True)
     pipe = pipe.to(dtype=torch.bfloat16)
     pipe.text_encoder.to('cuda'); pipe.generator.to('cuda'); pipe.vae.to('cuda')
@@ -189,7 +195,7 @@ if __name__ == '__main__':
     root = os.getcwd(); out = os.path.join(root, a.out, a.arm); os.makedirs(out, exist_ok=True)
     lo, hi = (int(x) for x in a.prompts.split('-'))
     c = arm_cfg(a.arm)
-    pipe, cfg = build(c['sink'])
+    pipe, cfg = build(c['sink'], ckpt=c['ckpt'])
     ext = [l.strip() for l in open('prompts/MovieGenVideoBench_extended.txt', encoding='utf-8')]
     short = [l.strip() for l in open('prompts/MovieGenVideoBench.txt', encoding='utf-8')]
     n_lat = 9 if a.smoke else a.latents

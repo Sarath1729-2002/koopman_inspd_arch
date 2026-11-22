@@ -25,6 +25,7 @@ from huggingface_hub import snapshot_download, hf_hub_download
 tok = os.environ.get('HF_TOKEN')
 snapshot_download('Wan-AI/Wan2.1-T2V-1.3B', local_dir='wan_models/Wan2.1-T2V-1.3B', token=tok)
 hf_hub_download('gdhe17/Self-Forcing', 'checkpoints/self_forcing_dmd.pt', local_dir='.', token=tok)
+hf_hub_download('gdhe17/Self-Forcing', 'checkpoints/ode_init.pt', local_dir='.', token=tok)
 print('weights ok')
 PY
 ls -la wan_models/Wan2.1-T2V-1.3B checkpoints | head -20

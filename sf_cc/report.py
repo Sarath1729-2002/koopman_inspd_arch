@@ -6,7 +6,12 @@ Windows: first 10 s and last 10 s of each 60 s video; paired over prompts (same 
   S2 no collapse: reenc1 last-10 s motion (flow) >= 0.8 x base AND last-10 s CLIP text alignment >= base - 0.5
   S3 control: noise1 vs base last-10 s aesthetic difference CI includes 0 or is below 0
   S4 stacks with an attention sink: sink3_reenc1 vs sink3 last-10 s aesthetic CI > 0
-HEADLINE: S1 and S2 and S3 (S4 reported).  Also reported: reenc2, DINO consistency, sharpness, brightness, overhead,
+HEADLINE: S1 and S2 and S3 (S4 reported).
+Added after the first run (hypothesis: correction substitutes for training on own rollouts), fixed before the ODE run:
+  O1: ode_reenc1 vs ode_base (same architecture, never trained on own outputs), last-10 s aesthetic CI > 0
+  O2 control: ode_noise1 vs ode_base, last-10 s aesthetic CI includes 0 or is below 0
+  O3 contrast: (ode_reenc1 - ode_base) - (reenc1 - base) > 0 with CI excluding 0 (correction helps more without
+     self-rollout training)  Also reported: reenc2, DINO consistency, sharpness, brightness, overhead,
 drift signal over time."""
 import glob, json, os, sys, numpy as np
 
@@ -45,8 +50,8 @@ def mean_win(arm, k, which):
     return float(np.mean([win(m, k, which) for m, _ in D[arm].values()]))
 
 
-order = [a for a in ['base', 'reenc1', 'reenc2', 'noise1', 'sink3', 'sink3_reenc1'] if a in D] + [a for a in arms if a not in
-         ['base', 'reenc1', 'reenc2', 'noise1', 'sink3', 'sink3_reenc1'] and a in D]
+KNOWN = ['base', 'reenc1', 'reenc2', 'noise1', 'sink3', 'sink3_reenc1', 'ode_base', 'ode_reenc1', 'ode_reenc2', 'ode_noise1']
+order = [a for a in KNOWN if a in D] + [a for a in arms if a not in KNOWN and a in D]
 L = ['# Course correction in Self-Forcing (Wan2.1-T2V-1.3B), 60 s videos (~3x the training length)', '',
      f'Prompts: MovieGenVideoBench (extended prompts for generation, short prompts for CLIP scoring); '
      f'n = {len(D["base"])} paired videos per arm. Windows = first / last 10 s.', '',
@@ -83,7 +88,29 @@ if 'noise1' in D:
 if 'sink3_reenc1' in D and 'sink3' in D:
     s = paired('sink3_reenc1', 'aesthetic', 'last', ref='sink3'); ok['S4'] = s[1] > 0
     L.append(f'Stacking with an attention sink: sink3_reenc1 - sink3, last-10 s aesthetic {fmt(s)}.')
+ODE = [a for a in ('ode_reenc1', 'ode_reenc2', 'ode_noise1') if a in D]
+if 'ode_base' in D and ODE:
+    L += ['', '## Same model before self-rollout training (ode_init.pt), paired vs ode_base', '',
+          '| arm | aesthetic last 10 s | aesthetic drift (last - first) | CLIP last | motion last | DINO-to-first last |', '|---|---|---|---|---|---|']
+    for a in ODE:
+        L.append(f"| {a} | {fmt(paired(a, 'aesthetic', 'last', 'ode_base'))} | {fmt(paired(a, 'aesthetic', 'drift', 'ode_base'))} | "
+                 f"{fmt(paired(a, 'clip', 'last', 'ode_base'))} | {fmt(paired(a, 'flow', 'last', 'ode_base'))} | "
+                 f"{fmt(paired(a, 'dino_first', 'last', 'ode_base'))} |")
+    L.append(f"ode_base vs base (what self-rollout training buys): last-10 s aesthetic {fmt(paired('ode_base', 'aesthetic', 'last'))}")
+    if 'ode_reenc1' in D:
+        ok['O1'] = paired('ode_reenc1', 'aesthetic', 'last', 'ode_base')[1] > 0
+        cm = sorted(set.intersection(*[set(D[a]) for a in ('ode_reenc1', 'ode_base', 'reenc1', 'base')]))
+        w = lambda a, i: win(D[a][i][0], 'aesthetic', 'last')
+        dd = np.array([(w('ode_reenc1', i) - w('ode_base', i)) - (w('reenc1', i) - w('base', i)) for i in cm])
+        if len(dd):
+            bs = [dd[rng.integers(0, len(dd), len(dd))].mean() for _ in range(5000)]; lo, hi = np.percentile(bs, [2.5, 97.5])
+            ok['O3'] = lo > 0
+            L.append(f'Contrast (ode_reenc1 - ode_base) - (reenc1 - base), last-10 s aesthetic: {dd.mean():+.3f} [{lo:+.3f}, {hi:+.3f}] (n={len(dd)})')
+    if 'ode_noise1' in D:
+        ok['O2'] = paired('ode_noise1', 'aesthetic', 'last', 'ode_base')[1] <= 0
 L += ['', '## Pre-registered criteria', ''] + [f"- {k}: {'PASS' if v else 'FAIL'}" for k, v in ok.items()]
+if any(k in ok for k in ('O1', 'O2', 'O3')):
+    L += ['', f"**ODE-init test (O1, O2, O3): {'SUPPORTED' if all(ok.get(k, False) for k in ('O1', 'O2', 'O3')) else 'NOT SUPPORTED'}**"]
 L += ['', f"**HEADLINE (S1, S2, S3): {'SUPPORTED' if all(ok.get(k, False) for k in ('S1', 'S2', 'S3')) else 'NOT SUPPORTED'}**", '']
 try:
     import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
