@@ -14,7 +14,7 @@ inst torch; inst torchvision
 for p in "diffusers==0.31.0" "transformers>=4.49" accelerate ftfy easydict omegaconf einops imageio imageio-ffmpeg av \
          sentencepiece open_clip_torch matplotlib "huggingface_hub[cli]" scipy opencv-python-headless; do inst "$p"; done
 pip install --no-index --force-reinstall --no-deps torch torchvision >/dev/null 2>&1 || true   # keep a matched pair
-pip install --no-index flash_attn >/dev/null 2>&1 && echo "flash-attn installed" || echo "flash-attn not available: PyTorch SDPA fallback"
+pip uninstall -y flash_attn flash-attn >/dev/null 2>&1; echo "flash-attn not used (prebuilt wheels mismatch this torch); Wan falls back to PyTorch SDPA"
 mkdir -p "$SCRATCH/sf" ext
 [ -d "$SCRATCH/sf/Self-Forcing" ] || git clone https://github.com/guandeh17/Self-Forcing.git "$SCRATCH/sf/Self-Forcing"
 ln -sfn "$SCRATCH/sf/Self-Forcing" ext/Self-Forcing
