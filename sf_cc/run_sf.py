@@ -68,6 +68,35 @@ def patch_flash_attention():
     print(f'flash-attn unavailable: patched flash_attention -> PyTorch SDPA in {n} modules', flush=True)
 
 
+class StreamVAE:
+    """Temporally-consistent decode -> re-encode for Wan's causal 3D VAE (4x temporal compression).
+    Keeps the decoder's and encoder's causal feature caches across chunks, so re-encoding a chunk gives exactly the
+    latents that encoding the whole decoded video would give (first latent <-> 1 frame, later latents <-> 4 frames).
+    The windowed version used in the first run decoded each window as if it started a new clip."""
+    def __init__(s, wrapper):
+        s.m, s.mean, s.std = wrapper.model, wrapper.mean, wrapper.std
+        s.reset()
+
+    def reset(s):
+        cc = sys.modules[type(s.m).__module__].count_conv3d
+        s.dec, s.enc, s.first = [None] * cc(s.m.decoder), [None] * cc(s.m.encoder), True
+
+    @torch.no_grad()
+    def roundtrip(s, z):
+        """z: [B, T, C, h, w] = the next latents in video order. Returns E(D(z)) in the same layout."""
+        mean = s.mean.to(z.device, z.dtype).view(1, -1, 1, 1, 1); std = s.std.to(z.device, z.dtype).view(1, -1, 1, 1, 1)
+        x = s.m.conv2(z.permute(0, 2, 1, 3, 4) * std + mean)
+        pix = torch.cat([s.m.decoder(x[:, :, i:i + 1], feat_cache=s.dec, feat_idx=[0]) for i in range(x.shape[2])], 2)
+        pix = pix.clamp(-1, 1)
+        outs, p = [], 0
+        if s.first:
+            outs.append(s.m.encoder(pix[:, :, :1], feat_cache=s.enc, feat_idx=[0])); p, s.first = 1, False
+        while p < pix.shape[2]:
+            outs.append(s.m.encoder(pix[:, :, p:p + 4], feat_cache=s.enc, feat_idx=[0])); p += 4
+        mu, _ = s.m.conv1(torch.cat(outs, 2)).chunk(2, dim=1)
+        return ((mu - mean) / std).permute(0, 2, 1, 3, 4)
+
+
 def build(sink, local=21):
     sys.path.insert(0, SF); os.chdir(SF)
     patch_flash_attention()
@@ -105,6 +134,7 @@ def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4):
             pipe.kv_cache1[b]['local_end_index'] = torch.tensor([0], dtype=torch.long, device=dev)
     out = torch.zeros_like(noise)
     shifts, diag_time = [], 0.0
+    sv = StreamVAE(pipe.vae)   # one causal decode/encode stream per video, fed every chunk in order
     torch.cuda.synchronize(); t0 = time.time()
     cur = 0
     for blk in range(n_lat // F_):
@@ -118,14 +148,14 @@ def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4):
                 x = pipe.scheduler.add_noise(z.flatten(0, 1), torch.randn_like(z.flatten(0, 1)),
                                              nt * torch.ones([B * F_], device=dev, dtype=torch.long)).unflatten(0, z.shape[:2])
         act = c['P'] > 0 and (blk + 1) % c['P'] == 0 and blk > 0
-        diag = (not act) and blk % diag_every == 0
-        if act or diag:
-            torch.cuda.synchronize(); td = time.time()
-            win = torch.cat([out[:, max(0, cur - W):cur], z], 1)
-            pix = pipe.vae.decode_to_pixel(win)                                   # [B,T,C,H,W] in [-1,1]
-            zr = pipe.vae.encode_to_latent(pix.permute(0, 2, 1, 3, 4).to(torch.bfloat16))[:, -F_:].to(z.dtype)
-            s = ((zr.float() - z.float()) ** 2).flatten(1).sum(1) / (z.float() ** 2).flatten(1).sum(1)
+        # the stream must see every chunk to stay causal-consistent, so the round trip runs every chunk;
+        # its cost is counted only for arms that use it (act), and excluded otherwise
+        torch.cuda.synchronize(); td = time.time()
+        zr = sv.roundtrip(z).to(z.dtype)
+        s = ((zr.float() - z.float()) ** 2).flatten(1).sum(1) / (z.float() ** 2).flatten(1).sum(1)
+        if blk % diag_every == 0 or act:
             shifts.append([blk, float(s.mean())])
+        if True:
             if act:
                 if c['noise']:
                     d = (zr.float() - z.float()).flatten(1).norm(dim=1)
@@ -135,7 +165,7 @@ def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4):
                 else:
                     z = zr
             torch.cuda.synchronize()
-            if diag:
+            if not act and c['P'] == 0:
                 diag_time += time.time() - td
         out[:, cur:cur + F_] = z
         pipe.generator(noisy_image_or_video=z, conditional_dict=cond,

@@ -16,6 +16,7 @@ source "${SF_VENV:-$HOME/venvs/sf}/bin/activate"
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" PYTHONWARNINGS=ignore OMP_NUM_THREADS=4 TOKENIZERS_PARALLELISM=false
 export HF_HOME="${SF_HF_HOME:-$SCRATCH/hf_sf}" TORCH_HOME="${TORCH_HOME:-$HOME/.cache/torch}" HF_HUB_OFFLINE=1
 PROMPTS="${PROMPTS:-0-31}"; LAT="${LAT:-240}"; OUT=results_sf
+ARMS="${ARMS:-base reenc1 noise1 sink3 sink3_reenc1 reenc2}"
 mkdir -p logs/sf $OUT
 echo "===== $(date '+%F %T') node $(hostname)"; nvidia-smi -L
 CUDA_VISIBLE_DEVICES=0 python -m sf_cc.run_sf --arm reenc1 --smoke --out results_sf_smoke > logs/sf/smoke.log 2>&1
@@ -23,22 +24,23 @@ grep -q "SMOKE OK" logs/sf/smoke.log || { echo "SMOKE FAILED"; tail -40 logs/sf/
 grep "generator load\|^\[" logs/sf/smoke.log
 lo=${PROMPTS%-*}; hi=${PROMPTS#*-}; mid=$(( (lo + hi) / 2 ))
 JOBS=()
-for arm in base reenc1 noise1 sink3 sink3_reenc1 reenc2; do JOBS+=("$arm:$lo-$mid" "$arm:$((mid + 1))-$hi"); done
+for arm in $ARMS; do JOBS+=("$arm:$lo-$mid" "$arm:$((mid + 1))-$hi"); done
 # 2 lanes per GPU (each process ~30 GB), lanes run their share of jobs sequentially
 for lane in 0 1 2 3 4 5 6 7; do
   g=$((lane % 4))
   ( for ((k = lane; k < ${#JOBS[@]}; k += 8)); do
       arm=${JOBS[$k]%:*}; pr=${JOBS[$k]#*:}
-      CUDA_VISIBLE_DEVICES=$g python -m sf_cc.run_sf --arm $arm --prompts $pr --latents $LAT --out $OUT 2>&1 \
-        | grep -v "current_timestep" > logs/sf/${arm}_${pr}.log || echo "[sf] $arm $pr FAILED"
+      CUDA_VISIBLE_DEVICES=$g python -m sf_cc.run_sf --arm $arm --prompts $pr --latents $LAT --out $OUT \
+        > logs/sf/${arm}_${pr}.log 2>&1 || { echo "[sf] $arm $pr FAILED (exit $?)"; grep -v Warning logs/sf/${arm}_${pr}.log | tail -8; }
     done ) &
 done
 wait
 grep -h "^\[" logs/sf/*.log | tail -20
 echo "===== $(date '+%F %T') generation done: $(ls $OUT/*/*.mp4 | wc -l) videos"
-for g in 0 1 2; do
-  case $g in 0) A=base,reenc1;; 1) A=noise1,sink3;; 2) A=sink3_reenc1,reenc2;; esac
-  CUDA_VISIBLE_DEVICES=$g python -m sf_cc.metrics --root $OUT --arms $A > logs/sf/metrics_$g.log 2>&1 &
+g=0
+for arm in $ARMS; do   # metrics skip videos already scored
+  CUDA_VISIBLE_DEVICES=$((g % 4)) python -m sf_cc.metrics --root $OUT --arms $arm > logs/sf/metrics_$arm.log 2>&1 &
+  g=$((g + 1))
 done
 wait
 grep -h "Error\|Traceback" logs/sf/metrics_*.log | head
