@@ -19,8 +19,12 @@ MAX_NOISE = 1000
 
 def arm_cfg(arm):
     """base | stabN | reencP[_stabN] | reencP_mm | mm | evtK (re-encode a frame when its shift > K x real floor)
-    | partA (every frame z <- z + 0.A (E(D(z)) - z))"""
-    c = dict(stab=15, P=0, evt=0.0, alpha=1.0, mm=False)
+    | partA (every frame z <- z + 0.A (E(D(z)) - z))
+    suffixes: _lf  low-frequency-preserving re-encode: keep the model's own blurred latent (colour / lighting), take only
+                   the high-frequency structure from E(D(z))
+              _mp  mean-preserving re-encode: keep each channel's spatial mean of z
+              _s1  sampling seed 1 (noise-floor estimate)"""
+    c = dict(stab=15, P=0, evt=0.0, alpha=1.0, mm=False, keep=None, seed=0)
     parts = arm.split('_')
     for q in parts:
         if q.startswith('stab'): c['stab'] = int(q[4:])
@@ -28,7 +32,24 @@ def arm_cfg(arm):
         elif q.startswith('evt'): c['evt'] = float(q[3:])
         elif q.startswith('part'): c['P'], c['alpha'] = 1, float('0.' + q[4:])
         elif q == 'mm': c['mm'] = True
+        elif q in ('lf', 'mp'): c['keep'] = q
+        elif q.startswith('s') and q[1:].isdigit(): c['seed'] = int(q[1:])
     return c
+
+
+def blur(z, k=5):
+    import torch.nn.functional as F
+    return F.avg_pool2d(F.pad(z, (k // 2,) * 4, mode='replicate'), k, stride=1)
+
+
+def keep_lowfreq(z, zr, mode):
+    """Combine the projected latent zr = E(D(z)) with the model's own latent z: the projection supplies structure,
+    z keeps its colour / lighting so the VAE's reconstruction bias cannot compound."""
+    if mode == 'lf':
+        return zr - blur(zr) + blur(z)
+    if mode == 'mp':
+        return zr - zr.mean((-2, -1), keepdim=True) + z.mean((-2, -1), keepdim=True)
+    return zr
 
 
 def load_state(path):
@@ -171,8 +192,9 @@ class Oasis:
                 x_pred = a_next.sqrt() * x_start + x_noise * (1 - a_next).sqrt()
                 x[:, -1:] = x_pred[:, -1:]
             z = x[:, -1]
-            zr = s.reencode(z)
-            shift[:, i] = (zr - z).pow(2).flatten(1).sum(1) / z.pow(2).flatten(1).sum(1)
+            zr_raw = s.reencode(z)
+            zr = keep_lowfreq(z, zr_raw, cfg.get('keep'))
+            shift[:, i] = (zr_raw - z).pow(2).flatten(1).sum(1) / z.pow(2).flatten(1).sum(1)
             if cfg['evt'] > 0:
                 m = shift[:, i] > cfg['evt'] * floor
                 if m.any():
@@ -182,7 +204,8 @@ class Oasis:
                 if k == 1:
                     x[:, -1] = z + cfg['alpha'] * (zr - z)
                 else:
-                    x[:, -k:] = rearrange(s.reencode(rearrange(x[:, -k:], 'b k c h w -> (b k) c h w')),
+                    zk = rearrange(x[:, -k:], 'b k c h w -> (b k) c h w')
+                    x[:, -k:] = rearrange(keep_lowfreq(zk, s.reencode(zk), cfg.get('keep')),
                                           '(b k) c h w -> b k c h w', b=B)
                 n_re += k
             if cfg['mm']:
@@ -318,6 +341,7 @@ if __name__ == '__main__':
         print('!! no action file found: using all-zero (no-op) actions for every arm', flush=True)
     vi = max(a.video_idx, 0)
     real = read_frames(pairs[vi][0])
+    torch.manual_seed(arm_cfg(a.arm)['seed'])
     print('video', pairs[vi], 'frames', tuple(real.shape), flush=True)
     # real reference (pooled over all sample videos): VAE re-encode floor and per-channel latent stats
     ref = torch.cat([read_frames(v)[::2] for v, _ in pairs])[:1200].to(dev)
@@ -349,6 +373,7 @@ if __name__ == '__main__':
     # real reference: all frames of the sample videos (subsampled), their stats, and the VAE re-encode floor
     F_ref = feats(net, ref).cpu().numpy()
     st_ref = {k: float(v.mean()) for k, v in img_stats(ref).items()}
+    st_vid = {k: float(v.mean()) for k, v in img_stats(real[::4][:300].to(dev)).items()}   # the prompt video's own stats
     lat_ref = {'mean': float(zr.mean()), 'std': float(zr.std())}
     from sklearn.decomposition import PCA
     pca = PCA(64).fit(F_ref)
@@ -360,7 +385,7 @@ if __name__ == '__main__':
             bins.append(b0); fd.append(frechet(pca.transform(G), R64))
     res = {'arm': a.arm, 'video_idx': vi, 'video': os.path.basename(pairs[vi][0]), 'cfg': cfg,
            'n_reenc': n_re.cpu().numpy().tolist(), 'stab': stab, 'P': P, 'frames': frames, 'offsets': offsets, 'shift_floor_real': floor,
-           'ref': {**st_ref, 'lat': lat_ref}, 'shift': shift.cpu().numpy().tolist(),
+           'ref': {**st_ref, 'lat': lat_ref}, 'ref_video': st_vid, 'shift': shift.cpu().numpy().tolist(),
            'bright': st['bright'].tolist(), 'sat': st['sat'].tolist(), 'sharp': st['sharp'].tolist(),
            'lat_mean': lat_mean.tolist(), 'lat_std': lat_std.tolist(), 'change': change.tolist(),
            'fd_bins': bins, 'fd': fd, 'seconds': time.time() - t0}
