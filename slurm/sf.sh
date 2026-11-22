@@ -1,0 +1,46 @@
+#!/bin/bash
+# Course correction in Self-Forcing (Wan2.1-T2V-1.3B): 32 MovieGenVideoBench prompts x 6 arms, 60 s videos (240 latent
+# frames, ~3x training length) -> metrics -> results_sf/SF_REPORT.md + fig_sf.png. Needs `bash sf_cc/prep.sh` once.
+# Arms: base | reenc1 | reenc2 | noise1 (equal-size random nudge control) | sink3 (attention sink) | sink3_reenc1. Resumable.
+#SBATCH --job-name=sf_cc
+#SBATCH --account=aip-oberman
+#SBATCH --gpus-per-node=h100:4
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=0
+#SBATCH --time=10:00:00
+#SBATCH --output=logs/%x-%j.out
+set -uo pipefail
+cd "$SLURM_SUBMIT_DIR"
+module load gcc arrow python/3.11 cuda
+source "${SF_VENV:-$HOME/venvs/sf}/bin/activate"
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" PYTHONWARNINGS=ignore OMP_NUM_THREADS=4 TOKENIZERS_PARALLELISM=false
+export HF_HOME="${SF_HF_HOME:-$SCRATCH/hf_sf}" TORCH_HOME="${TORCH_HOME:-$HOME/.cache/torch}" HF_HUB_OFFLINE=1
+PROMPTS="${PROMPTS:-0-31}"; LAT="${LAT:-240}"; OUT=results_sf
+mkdir -p logs/sf $OUT
+echo "===== $(date '+%F %T') node $(hostname)"; nvidia-smi -L
+CUDA_VISIBLE_DEVICES=0 python -m sf_cc.run_sf --arm reenc1 --smoke --out results_sf_smoke > logs/sf/smoke.log 2>&1
+grep -q "SMOKE OK" logs/sf/smoke.log || { echo "SMOKE FAILED"; tail -40 logs/sf/smoke.log; exit 1; }
+grep "generator load\|^\[" logs/sf/smoke.log
+lo=${PROMPTS%-*}; hi=${PROMPTS#*-}; mid=$(( (lo + hi) / 2 ))
+JOBS=()
+for arm in base reenc1 noise1 sink3 sink3_reenc1 reenc2; do JOBS+=("$arm:$lo-$mid" "$arm:$((mid + 1))-$hi"); done
+# 2 lanes per GPU (each process ~30 GB), lanes run their share of jobs sequentially
+for lane in 0 1 2 3 4 5 6 7; do
+  g=$((lane % 4))
+  ( for ((k = lane; k < ${#JOBS[@]}; k += 8)); do
+      arm=${JOBS[$k]%:*}; pr=${JOBS[$k]#*:}
+      CUDA_VISIBLE_DEVICES=$g python -m sf_cc.run_sf --arm $arm --prompts $pr --latents $LAT --out $OUT 2>&1 \
+        | grep -v "current_timestep" > logs/sf/${arm}_${pr}.log || echo "[sf] $arm $pr FAILED"
+    done ) &
+done
+wait
+grep -h "^\[" logs/sf/*.log | tail -20
+echo "===== $(date '+%F %T') generation done: $(ls $OUT/*/*.mp4 | wc -l) videos"
+for g in 0 1 2; do
+  case $g in 0) A=base,reenc1;; 1) A=noise1,sink3;; 2) A=sink3_reenc1,reenc2;; esac
+  CUDA_VISIBLE_DEVICES=$g python -m sf_cc.metrics --root $OUT --arms $A > logs/sf/metrics_$g.log 2>&1 &
+done
+wait
+grep -h "Error\|Traceback" logs/sf/metrics_*.log | head
+python -m sf_cc.report $OUT
+echo "===== DONE -> $OUT/SF_REPORT.md  $OUT/fig_sf.png  videos in $OUT/<arm>/"
