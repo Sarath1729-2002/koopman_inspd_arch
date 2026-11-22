@@ -24,7 +24,7 @@ def arm_cfg(arm):
                    the high-frequency structure from E(D(z))
               _mp  mean-preserving re-encode: keep each channel's spatial mean of z
               _s1  sampling seed 1 (noise-floor estimate)"""
-    c = dict(stab=15, P=0, evt=0.0, alpha=1.0, mm=False, keep=None, seed=0)
+    c = dict(stab=15, P=0, evt=0.0, alpha=1.0, mm=False, keep=None, seed=0, noise=False)
     parts = arm.split('_')
     for q in parts:
         if q.startswith('stab'): c['stab'] = int(q[4:])
@@ -33,6 +33,7 @@ def arm_cfg(arm):
         elif q.startswith('part'): c['P'], c['alpha'] = 1, float('0.' + q[4:])
         elif q == 'mm': c['mm'] = True
         elif q in ('lf', 'mp'): c['keep'] = q
+        elif q.startswith('noise'): c['P'], c['noise'] = int(q[5:]), True   # control: random nudge of equal size
         elif q.startswith('s') and q[1:].isdigit(): c['seed'] = int(q[1:])
     return c
 
@@ -201,7 +202,13 @@ class Oasis:
                     x[m, -1] = zr[m]; n_re += m.float()
             elif P and (i - n_p + 1) % P == 0:
                 k = min(P, i - n_p + 1)
-                if k == 1:
+                if cfg.get('noise'):
+                    zk = rearrange(x[:, -k:], 'b k c h w -> (b k) c h w')
+                    d = (keep_lowfreq(zk, s.reencode(zk), cfg.get('keep')) - zk).flatten(1).norm(dim=1)
+                    eps = torch.randn_like(zk)
+                    eps = eps / eps.flatten(1).norm(dim=1).view(-1, 1, 1, 1) * d.view(-1, 1, 1, 1)
+                    x[:, -k:] = rearrange(zk + eps, '(b k) c h w -> b k c h w', b=B)
+                elif k == 1:
                     x[:, -1] = z + cfg['alpha'] * (zr - z)
                 else:
                     zk = rearrange(x[:, -k:], 'b k c h w -> (b k) c h w')
@@ -262,6 +269,18 @@ def load_actions(path, offset, n, A=25):
     a = torch.cat([torch.zeros_like(a[:1]), a[offset:]], 0)   # Oasis convention: zero action for the prompt frame
     reps = int(np.ceil(n / a.shape[0]))
     return a.repeat(reps, 1)[:n]
+
+
+def vit(dev, allow_random=False):
+    import torchvision
+    try:
+        m = torchvision.models.vit_b_16(weights='IMAGENET1K_V1')
+    except Exception as e:
+        if not allow_random:
+            raise RuntimeError('ViT-B/16 weights missing: run the weight download on the login node') from e
+        print('!! ViT weights unavailable, random weights (selftest only)'); m = torchvision.models.vit_b_16()
+    m.heads = torch.nn.Identity()
+    return m.to(dev).eval()
 
 
 def resnet(dev, allow_random=False):
@@ -360,45 +379,105 @@ if __name__ == '__main__':
     print(f'arm {a.arm}: {cfg}  real floor {floor:.4f}  B={len(offsets)} frames={frames} '
           f'latent {tuple(x0.shape)} max_frames {O.max_frames}', flush=True)
     t0 = time.time()
-    lat, shift, n_re = O.rollout(x0, actions, frames, cfg, floor, ref_mu, ref_sd)
-    print(f'rollout done in {time.time() - t0:.0f}s', flush=True)
-    B = lat.shape[0]
-    imgs = O.decode(rearrange(lat, 'b t c h w -> (b t) c h w'))
-    st = {k: rearrange(v, '(b t) -> b t', b=B).cpu().numpy() for k, v in img_stats(imgs).items()}
-    lat_mean = lat.mean((2, 3, 4)).cpu().numpy(); lat_std = lat.std((2, 3, 4)).cpu().numpy()
-    change = (imgs.view(B, frames, *imgs.shape[1:])[:, 1:] - imgs.view(B, frames, *imgs.shape[1:])[:, :-1]
-              ).abs().flatten(2).mean(2).cpu().numpy()
-    net = resnet(dev, allow_random=a.selftest or os.environ.get('VID_ALLOW_RANDOM') == '1')
-    F_gen = feats(net, imgs).cpu().numpy().reshape(B, frames, -1)
-    # real reference: all frames of the sample videos (subsampled), their stats, and the VAE re-encode floor
-    F_ref = feats(net, ref).cpu().numpy()
+    outs = []   # roll prompts out in chunks of 4 to bound GPU memory (v1 used ~42 GB at 4 prompts x 512 frames)
+    for c0 in range(0, x0.shape[0], 4):
+        outs.append(O.rollout(x0[c0:c0 + 4], actions[c0:c0 + 4], frames, cfg, floor, ref_mu, ref_sd))
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    lat, shift, n_re = (torch.cat([o_[j] for o_ in outs]) for j in range(3))
+    t_roll = time.time() - t0
+    print(f'rollout done in {t_roll:.0f}s', flush=True)
+    B, T = lat.shape[:2]
+    allow = a.selftest or os.environ.get('VID_ALLOW_RANDOM') == '1'
+    nets = {'resnet': resnet(dev, allow), 'vit': vit(dev, allow)}
+    stats = {k: np.zeros((B, T), np.float32) for k in ('bright', 'sat', 'sharp')}
+    change = np.zeros((B, T - 1), np.float32)
+    feats_all = {k: [] for k in nets}
+    strip_t = sorted({0, T // 4, T // 2, (3 * T) // 4, T - 1})
+    strips, prev = {}, None
+    mp4 = None
+    if not a.selftest:
+        try:
+            import av
+            mp4 = av.open(f'{a.out}/{tag}.mp4', 'w'); vs = mp4.add_stream('libx264', rate=20)
+            vs.width, vs.height, vs.pix_fmt = lat.shape[-1] * O.patch, lat.shape[-2] * O.patch, 'yuv420p'
+        except Exception as e:
+            print('mp4 disabled:', e); mp4 = None
+    CH = 32
+    for t0_ in range(0, T, CH):
+        t1_ = min(T, t0_ + CH)
+        im = O.decode(rearrange(lat[:, t0_:t1_], 'b t c h w -> (b t) c h w'))           # [B*k,3,H,W]
+        k = t1_ - t0_
+        for name, v in img_stats(im).items():
+            stats[name][:, t0_:t1_] = rearrange(v, '(b t) -> b t', b=B).cpu().numpy()
+        imv = im.view(B, k, *im.shape[1:])
+        seq = imv if prev is None else torch.cat([prev, imv], 1)
+        ch = (seq[:, 1:] - seq[:, :-1]).abs().flatten(2).mean(2).cpu().numpy()
+        change[:, max(0, t0_ - 1):t1_ - 1] = ch
+        prev = imv[:, -1:]
+        for name, net in nets.items():
+            feats_all[name].append(feats(net, im).cpu().view(B, k, -1).half())
+        for tt in strip_t:
+            if t0_ <= tt < t1_:
+                strips[tt] = (imv[0, tt - t0_].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+        if mp4 is not None:
+            import av
+            for f in (imv[0].permute(0, 2, 3, 1).cpu().numpy() * 255).astype(np.uint8):
+                for pk in vs.encode(av.VideoFrame.from_ndarray(f, format='rgb24')):
+                    mp4.mux(pk)
+    if mp4 is not None:
+        for pk in vs.encode():
+            mp4.mux(pk)
+        mp4.close()
+    F = {n: torch.cat(v, 1).float().numpy() for n, v in feats_all.items()}          # [B,T,D]
+    # real reference features (pooled sample videos), cached once per output dir
+    ref_f = f'{a.out}/ref_feats.npz'
+    if os.path.exists(ref_f) and not a.selftest:
+        Rf = dict(np.load(ref_f))
+    else:
+        Rf = {n: feats(net, ref).cpu().numpy() for n, net in nets.items()}
+        if not a.selftest:
+            np.savez(ref_f + '.tmp.npz', **Rf); os.replace(ref_f + '.tmp.npz', ref_f)   # atomic: runs share it
     st_ref = {k: float(v.mean()) for k, v in img_stats(ref).items()}
-    st_vid = {k: float(v.mean()) for k, v in img_stats(real[::4][:300].to(dev)).items()}   # the prompt video's own stats
+    st_vid = {k: float(v.mean()) for k, v in img_stats(real[::4][:300].to(dev)).items()}
     lat_ref = {'mean': float(zr.mean()), 'std': float(zr.std())}
+    # action responsiveness: does frame change still follow the actions? (camera = keys 15,16; movement 11-14)
+    act = actions[:, :T].cpu().numpy()
+    a_mag = np.abs(act[:, 1:, 15:17]).sum(-1) + np.abs(act[:, 1:, 11:15]).sum(-1)
+    a_all = np.abs(act[:, 1:]).sum(-1)
+    def corr(x, y):
+        x, y = x - x.mean(), y - y.mean()
+        return float((x * y).sum() / (np.sqrt((x * x).sum() * (y * y).sum()) + 1e-12))
+    resp = [corr(a_mag[b], change[b]) for b in range(B)]
+    resp_all = [corr(a_all[b], change[b]) for b in range(B)]
     from sklearn.decomposition import PCA
-    pca = PCA(64).fit(F_ref)
-    R64 = pca.transform(F_ref)
-    bins, fd = [], []
-    for b0 in range(0, frames, 64):
-        G = F_gen[:, b0:b0 + 64].reshape(-1, F_gen.shape[-1])
-        if G.shape[0] >= 32:
-            bins.append(b0); fd.append(frechet(pca.transform(G), R64))
+    fd = {}
+    for n in nets:
+        pca = PCA(64).fit(Rf[n]); R64 = pca.transform(Rf[n])
+        bins, vals = [], []
+        for b0 in range(0, T, 128):
+            G = F[n][:, b0:b0 + 128].reshape(-1, F[n].shape[-1])
+            if G.shape[0] >= 32:
+                bins.append(b0); vals.append(frechet(pca.transform(G), R64))
+        fd[n] = vals
     res = {'arm': a.arm, 'video_idx': vi, 'video': os.path.basename(pairs[vi][0]), 'cfg': cfg,
-           'n_reenc': n_re.cpu().numpy().tolist(), 'stab': stab, 'P': P, 'frames': frames, 'offsets': offsets, 'shift_floor_real': floor,
-           'ref': {**st_ref, 'lat': lat_ref}, 'ref_video': st_vid, 'shift': shift.cpu().numpy().tolist(),
-           'bright': st['bright'].tolist(), 'sat': st['sat'].tolist(), 'sharp': st['sharp'].tolist(),
-           'lat_mean': lat_mean.tolist(), 'lat_std': lat_std.tolist(), 'change': change.tolist(),
-           'fd_bins': bins, 'fd': fd, 'seconds': time.time() - t0}
+           'n_reenc': n_re.cpu().numpy().tolist(), 'stab': stab, 'P': P, 'frames': T, 'offsets': offsets,
+           'shift_floor_real': floor, 'ref': {**st_ref, 'lat': lat_ref}, 'ref_video': st_vid,
+           'shift': shift.cpu().numpy().tolist(), **{k: v.tolist() for k, v in stats.items()},
+           'lat_mean': lat.mean((2, 3, 4)).cpu().numpy().tolist(), 'lat_std': lat.std((2, 3, 4)).cpu().numpy().tolist(),
+           'change': change.tolist(), 'resp': resp, 'resp_all': resp_all, 'fd_bins': bins, 'fd': fd['resnet'],
+           'fd_vit': fd['vit'], 'seconds_rollout': t_roll, 'seconds': time.time() - t0}
     if a.selftest:
-        print('SELFTEST OK', {k: (v if not isinstance(v, list) else np.asarray(v).shape) for k, v in res.items()
-                               if k in ('shift_floor_real', 'fd', 'ref')})
+        print('SELFTEST OK', {'floor': floor, 'fd': fd, 'resp': resp, 'feat_shapes': {n: v.shape for n, v in F.items()}})
         raise SystemExit
-    json.dump(res, open(f_out + '.tmp', 'w')); os.replace(f_out + '.tmp', f_out)
+    np.savez_compressed(f'{a.out}/{tag}_feats.npz', **{n: v.astype(np.float16) for n, v in F.items()}, actions=act)
     try:
-        v = (imgs.view(B, frames, *imgs.shape[1:])[0].permute(0, 2, 3, 1).cpu() * 255).byte()
-        write_mp4(f'{a.out}/{tag}.mp4', v)
+        from PIL import Image
+        Image.fromarray(np.concatenate([strips[tt] for tt in strip_t], 1)).save(f'{a.out}/{tag}_strip.jpg', quality=85)
     except Exception as e:
-        print('video write failed:', e)
-    print(f'[{tag}] re-encodes/sample {n_re.mean().item():.0f}  shift first/last bin {np.mean(res["shift"], 0)[1:65].mean():.4f} / {np.mean(res["shift"], 0)[-64:].mean():.4f} '
-          f'(real floor {floor:.4f})  FD first/last {fd[0]:.1f} / {fd[-1]:.1f}  bright last/ref '
-          f'{st["bright"][:, -64:].mean() / st_ref["bright"]:.2f}', flush=True)
+        print('strip failed:', e)
+    json.dump(res, open(f_out + '.tmp', 'w')); os.replace(f_out + '.tmp', f_out)
+    sh = np.mean(res['shift'], 0)
+    print(f'[{tag}] re-encodes/sample {n_re.mean().item():.0f}  shift first/last {sh[1:65].mean():.4f} / {sh[-64:].mean():.4f} '
+          f'(floor {floor:.4f})  FD resnet {fd["resnet"][0]:.1f}->{fd["resnet"][-1]:.1f}  vit {fd["vit"][0]:.1f}->{fd["vit"][-1]:.1f}  '
+          f'bright last/video {stats["bright"][:, -64:].mean() / st_vid["bright"]:.2f}  resp {np.mean(resp):+.2f}  '
+          f'rollout {t_roll:.0f}s', flush=True)
