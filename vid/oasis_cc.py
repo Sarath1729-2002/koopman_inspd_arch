@@ -24,10 +24,11 @@ def arm_cfg(arm):
                    the high-frequency structure from E(D(z))
               _mp  mean-preserving re-encode: keep each channel's spatial mean of z
               _s1  sampling seed 1 (noise-floor estimate)"""
-    c = dict(stab=15, P=0, evt=0.0, alpha=1.0, mm=False, keep=None, seed=0, noise=False)
+    c = dict(stab=15, P=0, evt=0.0, alpha=1.0, mm=False, keep=None, seed=0, noise=False, sink=0)
     parts = arm.split('_')
     for q in parts:
         if q.startswith('stab'): c['stab'] = int(q[4:])
+        elif q.startswith('sink'): c['sink'] = int(q[4:])   # attention sink: first K frames (frame 0 = real prompt) stay in context
         elif q.startswith('reenc'): c['P'] = int(q[5:])
         elif q.startswith('evt'): c['evt'] = float(q[3:])
         elif q.startswith('part'): c['P'], c['alpha'] = 1, float('0.' + q[4:])
@@ -173,15 +174,20 @@ class Oasis:
             chunk = torch.randn((B, 1, *x.shape[-3:]), device=s.dev).clamp(-20, 20)
             x = torch.cat([x, chunk], 1)
             start = max(0, i + 1 - s.max_frames)
+            K = cfg.get('sink', 0)
+            if K and start > 0:   # sink frames + the most recent (max_frames - K) frames
+                idx = torch.tensor(list(range(K)) + list(range(max(K, i + 1 - (s.max_frames - K)), i + 1)), device=s.dev)
+            else:
+                idx = torch.arange(start, i + 1, device=s.dev)
             for ni in reversed(range(1, ddim_steps + 1)):
                 t_ctx = torch.full((B, i), stab - 1, dtype=torch.long, device=s.dev)
                 t = torch.full((B, 1), int(noise_range[ni]), dtype=torch.long, device=s.dev)
                 t_next = torch.full((B, 1), int(noise_range[ni - 1]), dtype=torch.long, device=s.dev)
                 t_next = torch.where(t_next < 0, t, t_next)
-                t, t_next = torch.cat([t_ctx, t], 1)[:, start:], torch.cat([t_ctx, t_next], 1)[:, start:]
-                xc = x[:, start:]
+                t, t_next = torch.cat([t_ctx, t], 1)[:, idx], torch.cat([t_ctx, t_next], 1)[:, idx]
+                xc = x[:, idx]
                 with torch.autocast('cuda', dtype=torch.half):
-                    v = s.model(xc, t, actions[:, start:i + 1])
+                    v = s.model(xc, t, actions[:, idx])
                 v = v.float()
                 a_t = s.ac[t]
                 x_start = a_t.sqrt() * xc - (1 - a_t).sqrt() * v
@@ -368,7 +374,7 @@ if __name__ == '__main__':
     floor = ((O.reencode(zr) - zr).pow(2).flatten(1).sum(1) / zr.pow(2).flatten(1).sum(1)).mean().item()
     ref_mu, ref_sd = zr.mean((0, 2, 3)), zr.std((0, 2, 3))
     offsets = [int(x) for x in a.offsets.split(',')]
-    frames = 3 if a.selftest else a.frames
+    frames = (40 if arm_cfg(a.arm)['sink'] else 3) if a.selftest else a.frames   # 40 > 32 exercises the sink path
     if a.selftest:
         offsets = offsets[:1]
     offsets = [min(o_, real.shape[0] - 1) for o_ in offsets]

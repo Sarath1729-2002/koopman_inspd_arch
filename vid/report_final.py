@@ -65,8 +65,8 @@ vids = sorted({k[1] for k in runs})
 base_u = {n: unit_feats('base', n) for n in P}
 
 
-def boot_ratio(meth, n, metric, B=2000):
-    U, Ub = unit_feats(meth, n), base_u[n]
+def boot_ratio(meth, n, metric, B=2000, ref='base'):
+    U, Ub = unit_feats(meth, n), (base_u[n] if ref == 'base' else unit_feats(ref, n))
     keys = sorted(set(U) & set(Ub))
     if not keys:
         return nan3
@@ -109,7 +109,7 @@ def mci(x):
 
 
 secs = lambda meth: np.mean([r['seconds_rollout'] for (m_, v, s), r in runs.items() if m_ == meth])
-order = ['base', 'reenc4_lf', 'reenc4', 'noise4', 'reenc1_lf', 'reenc8_lf', 'reenc16_lf', 'evt2_lf', 'reenc4_mp', 'stab50']
+order = ['base', 'reenc4_lf', 'reenc4', 'noise4', 'sink4', 'sink4_reenc4', 'sink4_noise4', 'sink1', 'sink1_reenc4', 'reenc1_lf', 'reenc8_lf', 'reenc16_lf', 'evt2_lf', 'reenc4_mp', 'stab50']
 order = [m for m in order if m in meths] + [m for m in meths if m not in order]
 T = {}
 L = ['# Course correction in a streaming video world model (Open-Oasis 500M) — final evidence', '',
@@ -160,12 +160,34 @@ if 'reenc4_lf' in T:
     if 'noise4' in T:
         n4 = T['noise4']['fd_r']; ok['F3'] = (n4[1] <= 1 <= n4[2]) or (n4[0] >= t['fd_r'][0] + 0.10)
     ok['F4'] = t['resp'] >= 0.8 * T['base']['resp'] if T['base']['resp'] > 0 else t['resp'] >= T['base']['resp'] - 0.05
+# ---- COMBINATION (attention sink x re-encoding). Criteria fixed before the combo run (slurm/combo.sh):
+#   C1 primary: sink4_reenc4 / sink4 FD ratio (ResNet) CI upper < 1 (re-encoding still helps on top of the sink)
+#               AND sink4_reenc4 / base point ratio < reenc4 / base point ratio (the pair beats either part)
+#   C2 control: sink4_noise4 / sink4 CI includes 1 or ratio >= sink4_reenc4/sink4 + 0.10
+#   C3 control preserved: action responsiveness of sink4_reenc4 >= 0.8 x base
+if 'sink4_reenc4' in meths and 'sink4' in meths:
+    L += ['## Combination: attention sink x re-encoding', '', '| comparison | FD ratio ResNet [CI] | FD ratio ViT [CI] | KID ratio ResNet [CI] |', '|---|---|---|---|']
+    CT = {}
+    for m, r_ in [('sink4', 'base'), ('sink1', 'base'), ('sink4_reenc4', 'base'), ('sink1_reenc4', 'base'),
+                  ('sink4_reenc4', 'sink4'), ('sink1_reenc4', 'sink1'), ('sink4_noise4', 'sink4'), ('sink4_reenc4', 'reenc4')]:
+        if m in meths and r_ in meths:
+            CT[(m, r_)] = [boot_ratio(m, n, k2, ref=r_) for n, k2 in (('resnet', 'fd'), ('vit', 'fd'), ('resnet', 'kid'))]
+            c = lambda t: f'{t[0]:.2f} [{t[1]:.2f}, {t[2]:.2f}]'
+            L.append(f'| {m} / {r_} | ' + ' | '.join(c(t) for t in CT[(m, r_)]) + ' |')
+    pr = CT.get(('sink4_reenc4', 'sink4'))
+    if pr and 'reenc4' in T:
+        ok['C1'] = pr[0][2] < 1 and T['sink4_reenc4']['fd_r'][0] < T['reenc4']['fd_r'][0]
+    if ('sink4_noise4', 'sink4') in CT and pr:
+        n_ = CT[('sink4_noise4', 'sink4')][0]; ok['C2'] = (n_[1] <= 1 <= n_[2]) or n_[0] >= pr[0][0] + 0.10
+    if 'sink4_reenc4' in T:
+        ok['C3'] = T['sink4_reenc4']['resp'] >= 0.8 * T['base']['resp']
+    L += ['', f"**COMBINATION (C1-C3): {'SUPPORTED' if all(ok.get(k, False) for k in ('C1', 'C2', 'C3')) else 'NOT SUPPORTED'}**", '']
 L += ['## Pre-registered criteria', ''] + [f"- {k}: {'PASS' if v else 'FAIL'}" for k, v in ok.items()]
-L += ['', f"**HEADLINE (F1-F4): {'SUPPORTED' if ok and all(ok.values()) and len(ok) == 4 else 'NOT SUPPORTED'}**", '']
+L += ['', f"**HEADLINE (F1-F4): {'SUPPORTED' if all(ok.get(k, False) for k in ('F1', 'F2', 'F3', 'F4')) else 'NOT SUPPORTED'}**", '']
 # figures
 try:
     import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
-    show = [m for m in ['base', 'reenc4', 'reenc4_lf', 'noise4', 'stab50'] if m in meths]
+    show = [m for m in ['base', 'reenc4', 'reenc4_lf', 'noise4', 'stab50', 'sink4', 'sink4_reenc4'] if m in meths]
     fig, ax = plt.subplots(1, 3, figsize=(15, 4))
     for m in show:
         rs_ = [r for (m_, v, s), r in runs.items() if m_ == m]
