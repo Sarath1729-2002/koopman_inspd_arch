@@ -8,20 +8,22 @@ export JEPAWM_DSET=$SCRATCH/jepa_dset JEPAWM_LOGS=$SCRATCH/jepa_logs JEPAWM_CKPT
 export TORCH_HOME=$SCRATCH/torch_jwm HF_HOME=$SCRATCH/hf_jwm
 mkdir -p $JEPAWM_DSET $JEPAWM_LOGS $JEPAWM_CKPT $TORCH_HOME
 module load gcc arrow python/3.10 cuda 2>/dev/null || module load gcc arrow python/3.11 cuda
+module load opencv 2>/dev/null && echo 'opencv module loaded' || echo '!! no opencv module'
 python --version
 V=${JWM_VENV:-$SCRATCH/venvs/jwm}; export PIP_CACHE_DIR=$SCRATCH/pip_cache; mkdir -p $SCRATCH/venvs
 [ -d $V ] || virtualenv --no-download $V
 source $V/bin/activate
 pip install -q --upgrade pip
-pip install -q --no-index torch torchvision 2>/dev/null || pip install -q torch torchvision
-for p in tensordict timm einops decord scipy tqdm h5py matplotlib pandas imageio imageio-ffmpeg pyyaml omegaconf \
-         huggingface_hub datasets clusterscope opencv-python-headless termcolor "ruamel.yaml" lpips; do
+# torch, torchvision and tensordict from the cluster wheelhouse IN ONE CALL so pip picks a mutually compatible set
+pip install -q --no-index --upgrade torch torchvision tensordict 2>&1 | tail -2
+for p in timm einops decord scipy tqdm h5py matplotlib pandas imageio imageio-ffmpeg pyyaml omegaconf \
+         huggingface_hub datasets clusterscope termcolor "ruamel.yaml" lpips; do
   pip install -q "$p" 2>&1 | tail -1; python -c "import importlib.util,sys; m=sys.argv[1].split(\"[\")[0].replace(\"-\",\"_\").split(\"=\")[0]; m={\"pyyaml\":\"yaml\",\"opencv_python_headless\":\"cv2\",\"huggingface_hub\":\"huggingface_hub\",\"ruamel.yaml\":\"ruamel\",\"imageio_ffmpeg\":\"imageio_ffmpeg\"}.get(m,m); sys.exit(importlib.util.find_spec(m) is None)" "$p" || echo "!! pip $p failed"
 done
 [ -d $SCRATCH/jepa-wms/.git ] || git clone -q https://github.com/facebookresearch/jepa-wms $SCRATCH/jepa-wms
 mkdir -p ext; ln -sfn $SCRATCH/jepa-wms ext/jepa-wms
 pip install -q --no-deps -e ext/jepa-wms 2>&1 | tail -1
-python -c "import torch, torchvision; print('torch', torch.__version__, 'tv', torchvision.__version__)"
+python -c "import torch, torchvision, tensordict, cv2; print(\"torch\", torch.__version__, \"tv\", torchvision.__version__, \"tensordict\", tensordict.__version__, \"cv2\", cv2.__version__)"
 (cd ext/jepa-wms && HF_HUB_OFFLINE=0 python src/scripts/download_data.py --dataset pusht wall pointmaze) 2>&1 | tail -8
 ls $JEPAWM_DSET
 # cache weights (checkpoints, decoder heads, DINOv2 via torch.hub) by loading each model once on CPU
