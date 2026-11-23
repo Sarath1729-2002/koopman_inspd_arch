@@ -18,6 +18,8 @@ export HF_HOME="${SF_HF_HOME:-$SCRATCH/hf_sf}" TORCH_HOME="${TORCH_HOME:-$HOME/.
 PROMPTS="${PROMPTS:-0-31}"; LAT="${LAT:-240}"; OUT=results_sf
 ARMS="${ARMS:-base reenc1 noise1 sink3 sink3_reenc1 reenc2}"
 mkdir -p logs/sf $OUT
+if [[ " $ARMS" == *" ode"* ]] && [ ! -s ext/Self-Forcing/checkpoints/ode_init.pt ]; then
+  echo "MISSING ext/Self-Forcing/checkpoints/ode_init.pt -- download it on the login node first"; exit 1; fi
 echo "===== $(date '+%F %T') node $(hostname)"; nvidia-smi -L
 NG=$(nvidia-smi -L | wc -l); NL=$((2 * NG))
 SM=""; for a in $ARMS; do [[ $a == *reenc* ]] && { SM=$a; break; }; done; SM=${SM:-${ARMS%% *}}
