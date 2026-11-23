@@ -182,6 +182,29 @@ if 'sink4_reenc4' in meths and 'sink4' in meths:
     if 'sink4_reenc4' in T:
         ok['C3'] = T['sink4_reenc4']['resp'] >= 0.8 * T['base']['resp']
     L += ['', f"**COMBINATION (C1-C3): {'SUPPORTED' if all(ok.get(k, False) for k in ('C1', 'C2', 'C3')) else 'NOT SUPPORTED'}**", '']
+# ---- period sweep / trigger (reported, no pass/fail; choose P on the validation offsets, then confirm on test)
+sw = sorted([m for m in meths if re.match(r'sink4_(reenc\d+|evt[\d.]+)$', m)], key=lambda m: float(re.findall(r'[\d.]+', m.split('_')[1])[0]))
+if sw:
+    L += ['## Re-encoding period sweep (with sink4)', '', '| method | FD ResNet / base [CI] | FD ResNet / sink4 [CI] | KID ResNet / base | re-encodes per frame |', '|---|---|---|---|---|']
+    for m in sw:
+        a_ = boot_ratio(m, 'resnet', 'fd'); b_ = boot_ratio(m, 'resnet', 'fd', ref='sink4') if 'sink4' in meths else nan3
+        k_ = boot_ratio(m, 'resnet', 'kid')
+        nr = np.mean([np.mean(r['n_reenc']) / r['frames'] for (m2, v, s_), r in runs.items() if m2 == m])
+        L.append(f'| {m} | {a_[0]:.2f} [{a_[1]:.2f}, {a_[2]:.2f}] | {b_[0]:.2f} [{b_[1]:.2f}, {b_[2]:.2f}] | {k_[0]:.2f} | {nr:.3f} |')
+    L.append('')
+# ---- quality over time and effective horizon (how long each method stays as good as base is early on)
+if all('fd' in r for r in runs.values()):
+    curve = {m: np.mean([r['fd'] for (m2, v, s_), r in runs.items() if m2 == m], 0) for m in order}
+    bins_ = runs[next(iter(runs))]['fd_bins']
+    thr = curve['base'][1] if len(curve['base']) > 1 else curve['base'][0]
+    L += ['## FD to real frames over time (ResNet, mean over runs; lower = better)', '',
+          '| method | ' + ' | '.join(f'frames {b0}-{b0 + 127}' for b0 in bins_) + ' | frames until FD > base at frames ' + f'{bins_[1] if len(bins_) > 1 else bins_[0]}+ |',
+          '|---|' + '---|' * (len(bins_) + 1)]
+    for m in order:
+        c_ = curve[m]; over = [i for i, x in enumerate(c_) if i >= 1 and x > thr]
+        hz = f'{bins_[over[0]]}' if over else f'> {bins_[-1] + 127} (never)'
+        L.append(f'| {m} | ' + ' | '.join(f'{x:.1f}' for x in c_) + f' | {hz} |')
+    L.append('')
 L += ['## Pre-registered criteria', ''] + [f"- {k}: {'PASS' if v else 'FAIL'}" for k, v in ok.items()]
 L += ['', f"**HEADLINE (F1-F4): {'SUPPORTED' if all(ok.get(k, False) for k in ('F1', 'F2', 'F3', 'F4')) else 'NOT SUPPORTED'}**", '']
 # figures

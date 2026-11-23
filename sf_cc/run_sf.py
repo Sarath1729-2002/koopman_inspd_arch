@@ -6,6 +6,8 @@ Arms (name tokens joined by '_'):
   reencP        every P chunks: chunk latents z <- E(D([previous W latents, z]))[-3:]   (the projection)
   noiseP        control: z <- z + eps, |eps| = |E(D(.)) - z| per sample (same size, random direction)
   sinkK         attention sink: keep the first K latent frames in the cache (StreamingLLM / Deep-Forcing-style baseline)
+  cache         apply the correction only to the context written into the KV cache; the output video keeps the
+                generated latents (separates "clean context" from "lossy VAE round trip on what the viewer sees")
   ode           use checkpoints/ode_init.pt: the SAME causal 4-step student BEFORE Self-Forcing's self-rollout (DMD)
                 training, i.e. a model never trained on its own outputs (tests: does correction substitute for that?)
 Per video we save the mp4 (16 fps) and a json with per-chunk drift signal ||E(D(z)) - z||^2 / ||z||^2 and timings.
@@ -16,12 +18,13 @@ SF = os.path.abspath(os.environ.get('SF_DIR', 'ext/Self-Forcing'))
 
 
 def arm_cfg(arm):
-    c = dict(P=0, noise=False, sink=0, ckpt='dmd')
+    c = dict(P=0, noise=False, sink=0, ckpt='dmd', cache=False)
     for q in arm.split('_'):
         if q.startswith('reenc'): c['P'] = int(q[5:])
         elif q.startswith('noise'): c['P'], c['noise'] = int(q[5:]), True
         elif q.startswith('sink'): c['sink'] = int(q[4:])
         elif q == 'ode': c['ckpt'] = 'ode'
+        elif q == 'cache': c['cache'] = True   # correction goes ONLY into the KV-cache context; the output keeps the original latents
     return c
 
 
@@ -156,6 +159,7 @@ def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4):
         act = c['P'] > 0 and (blk + 1) % c['P'] == 0 and blk > 0
         # the stream must see every chunk to stay causal-consistent, so the round trip runs every chunk;
         # its cost is counted only for arms that use it (act), and excluded otherwise
+        z_out = z   # what the viewer sees (unless the correction is also applied to the output)
         torch.cuda.synchronize(); td = time.time()
         zr = sv.roundtrip(z).to(z.dtype)
         s = ((zr.float() - z.float()) ** 2).flatten(1).sum(1) / (z.float() ** 2).flatten(1).sum(1)
@@ -173,7 +177,7 @@ def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4):
             torch.cuda.synchronize()
             if not act and c['P'] == 0:
                 diag_time += time.time() - td
-        out[:, cur:cur + F_] = z
+        out[:, cur:cur + F_] = z_out if c.get('cache') else z
         pipe.generator(noisy_image_or_video=z, conditional_dict=cond,
                        timestep=torch.ones([B, F_], device=dev, dtype=torch.int64) * cfg.context_noise,
                        kv_cache=pipe.kv_cache1, crossattn_cache=pipe.crossattn_cache,
