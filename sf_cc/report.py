@@ -50,7 +50,8 @@ def mean_win(arm, k, which):
     return float(np.mean([win(m, k, which) for m, _ in D[arm].values()]))
 
 
-KNOWN = ['base', 'reenc1', 'reenc2', 'noise1', 'sink3', 'sink3_reenc1', 'ode_base', 'ode_reenc1', 'ode_reenc2', 'ode_noise1']
+KNOWN = ['base', 'reenc1', 'reenc2', 'noise1', 'sink3', 'sink3_reenc1', 'sink3_reenc1_cache', 'sink3_reenc2_cache',
+         'ode_base', 'ode_reenc1', 'ode_reenc2', 'ode_noise1']
 order = [a for a in KNOWN if a in D] + [a for a in arms if a not in KNOWN and a in D]
 L = ['# Course correction in Self-Forcing (Wan2.1-T2V-1.3B), 60 s videos (~3x the training length)', '',
      f'Prompts: MovieGenVideoBench (extended prompts for generation, short prompts for CLIP scoring); '
@@ -108,6 +109,16 @@ if 'ode_base' in D and ODE:
             L.append(f'Contrast (ode_reenc1 - ode_base) - (reenc1 - base), last-10 s aesthetic: {dd.mean():+.3f} [{lo:+.3f}, {hi:+.3f}] (n={len(dd)})')
     if 'ode_noise1' in D:
         ok['O2'] = paired('ode_noise1', 'aesthetic', 'last', 'ode_base')[1] <= 0
+# K1 (fixed before the cache run): cache-only correction beats the sink alone: sink3_reencP_cache vs sink3, last-10 s
+#    aesthetic CI > 0 for P = 1 or 2 (the viewer sees the raw latents; only the attended context is corrected)
+CA = [a for a in ('sink3_reenc1_cache', 'sink3_reenc2_cache') if a in D]
+if CA and 'sink3' in D:
+    L += ['', '## Cache-only correction, paired vs sink3 (attention sink alone)', '',
+          '| arm | aesthetic last 10 s | CLIP last | motion last | DINO-to-first last |', '|---|---|---|---|---|']
+    for a in CA:
+        L.append(f"| {a} | {fmt(paired(a, 'aesthetic', 'last', 'sink3'))} | {fmt(paired(a, 'clip', 'last', 'sink3'))} | "
+                 f"{fmt(paired(a, 'flow', 'last', 'sink3'))} | {fmt(paired(a, 'dino_first', 'last', 'sink3'))} |")
+    ok['K1'] = any(paired(a, 'aesthetic', 'last', 'sink3')[1] > 0 for a in CA)
 L += ['', '## Pre-registered criteria', ''] + [f"- {k}: {'PASS' if v else 'FAIL'}" for k, v in ok.items()]
 if any(k in ok for k in ('O1', 'O2', 'O3')):
     L += ['', f"**ODE-init test (O1, O2, O3): {'SUPPORTED' if all(ok.get(k, False) for k in ('O1', 'O2', 'O3')) else 'NOT SUPPORTED'}**"]

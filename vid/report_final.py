@@ -182,6 +182,25 @@ if 'sink4_reenc4' in meths and 'sink4' in meths:
     if 'sink4_reenc4' in T:
         ok['C3'] = T['sink4_reenc4']['resp'] >= 0.8 * T['base']['resp']
     L += ['', f"**COMBINATION (C1-C3): {'SUPPORTED' if all(ok.get(k, False) for k in ('C1', 'C2', 'C3')) else 'NOT SUPPORTED'}**", '']
+# ---- MECHANISM CONTROLS. Criteria fixed before the run (slurm/tonight.sh):
+#   M1 dynamic, not cosmetic: sink4_reenc4_ctx / sink4 FD (ResNet) CI upper < 1  (the viewer sees the RAW frames; only the
+#      model's context was corrected -> the gain is course correction of the rollout, not VAE post-processing)
+#   M2 post-hoc is not enough: post / base CI includes 1, or post ratio >= reenc4 ratio + 0.10
+CTRL = [('post', 'base'), ('reenc4_ctx', 'base'), ('reenc4_ctx', 'reenc4'), ('sink4_post', 'sink4'),
+        ('sink4_reenc4_ctx', 'sink4'), ('sink4_reenc4_ctx', 'sink4_reenc4')]
+if any(m in meths for m, _ in CTRL):
+    L += ['## Mechanism controls: is it course correction or VAE post-processing?', '',
+          '| comparison | FD ratio ResNet [CI] | FD ratio ViT [CI] | KID ratio ResNet [CI] |', '|---|---|---|---|']
+    MC = {}
+    for m, r_ in CTRL:
+        if m in meths and r_ in meths:
+            MC[(m, r_)] = [boot_ratio(m, n, k2, ref=r_) for n, k2 in (('resnet', 'fd'), ('vit', 'fd'), ('resnet', 'kid'))]
+            L.append(f'| {m} / {r_} | ' + ' | '.join(f'{t[0]:.2f} [{t[1]:.2f}, {t[2]:.2f}]' for t in MC[(m, r_)]) + ' |')
+    if ('sink4_reenc4_ctx', 'sink4') in MC:
+        ok['M1'] = MC[('sink4_reenc4_ctx', 'sink4')][0][2] < 1
+    if ('post', 'base') in MC and 'reenc4' in T:
+        p_ = MC[('post', 'base')][0]; ok['M2'] = (p_[1] <= 1 <= p_[2]) or p_[0] >= T['reenc4']['fd_r'][0] + 0.10
+    L += ['', f"**MECHANISM (M1, M2): {'SUPPORTED' if all(ok.get(k, False) for k in ('M1', 'M2')) else 'NOT SUPPORTED'}**", '']
 # ---- period sweep / trigger (reported, no pass/fail; choose P on the validation offsets, then confirm on test)
 sw = sorted([m for m in meths if re.match(r'sink4_(reenc\d+|evt[\d.]+)$', m)], key=lambda m: float(re.findall(r'[\d.]+', m.split('_')[1])[0]))
 if sw:

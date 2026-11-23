@@ -24,11 +24,13 @@ def arm_cfg(arm):
                    the high-frequency structure from E(D(z))
               _mp  mean-preserving re-encode: keep each channel's spatial mean of z
               _s1  sampling seed 1 (noise-floor estimate)"""
-    c = dict(stab=15, P=0, evt=0.0, alpha=1.0, mm=False, keep=None, seed=0, noise=False, sink=0)
+    c = dict(stab=15, P=0, evt=0.0, alpha=1.0, mm=False, keep=None, seed=0, noise=False, sink=0, ctx=False, post=False)
     parts = arm.split('_')
     for q in parts:
         if q.startswith('stab'): c['stab'] = int(q[4:])
-        elif q.startswith('sink'): c['sink'] = int(q[4:])   # attention sink: first K frames (frame 0 = real prompt) stay in context
+        elif q.startswith('sink'): c['sink'] = int(q[4:])
+        elif q == 'ctx': c['ctx'] = True     # correction feeds ONLY the model's context; the output video keeps the raw frames
+        elif q == 'post': c['post'] = True   # control: no feedback; re-encode every output frame once AFTER the rollout   # attention sink: first K frames (frame 0 = real prompt) stay in context
         elif q.startswith('reenc'): c['P'] = int(q[5:])
         elif q.startswith('evt'): c['evt'] = float(q[3:])
         elif q.startswith('part'): c['P'], c['alpha'] = 1, float('0.' + q[4:])
@@ -170,6 +172,7 @@ class Oasis:
         noise_range = torch.linspace(-1, MAX_NOISE - 1, ddim_steps + 1).long()
         shift = torch.zeros(B, frames, device=s.dev)
         t0 = time.time()
+        raw = []
         for i in range(n_p, frames):
             chunk = torch.randn((B, 1, *x.shape[-3:]), device=s.dev).clamp(-20, 20)
             x = torch.cat([x, chunk], 1)
@@ -199,6 +202,8 @@ class Oasis:
                 x_pred = a_next.sqrt() * x_start + x_noise * (1 - a_next).sqrt()
                 x[:, -1:] = x_pred[:, -1:]
             z = x[:, -1]
+            if cfg.get('ctx'):
+                raw.append(z.clone())
             zr_raw = s.reencode(z)
             zr = keep_lowfreq(z, zr_raw, cfg.get('keep'))
             shift[:, i] = (zr_raw - z).pow(2).flatten(1).sum(1) / z.pow(2).flatten(1).sum(1)
@@ -225,6 +230,12 @@ class Oasis:
                 x[:, -1] = mm(x[:, -1])
             if (i + 1) % log_every == 0:
                 print(f'  frame {i + 1}/{frames}  shift {shift[:, i].mean():.4f}  ({time.time() - t0:.0f}s)', flush=True)
+        if cfg.get('ctx'):
+            x = torch.cat([x[:, :n_p], torch.stack(raw, 1)], 1)
+        if cfg.get('post'):
+            for j in range(n_p, x.shape[1]):
+                x[:, j] = s.reencode(x[:, j])
+            n_re += x.shape[1] - n_p
         return x, shift, n_re
 
 
