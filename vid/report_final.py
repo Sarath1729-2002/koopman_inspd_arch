@@ -169,7 +169,7 @@ if 'sink4_reenc4' in meths and 'sink4' in meths:
     L += ['## Combination: attention sink x re-encoding', '', '| comparison | FD ratio ResNet [CI] | FD ratio ViT [CI] | KID ratio ResNet [CI] |', '|---|---|---|---|']
     CT = {}
     for m, r_ in [('sink4', 'base'), ('sink1', 'base'), ('sink4_reenc4', 'base'), ('sink1_reenc4', 'base'),
-                  ('sink4_reenc4', 'sink4'), ('sink1_reenc4', 'sink1'), ('sink4_noise4', 'sink4'), ('sink4_reenc4', 'reenc4')]:
+                  ('sink4_reenc4', 'sink4'), ('sink1_reenc4', 'sink1'), ('sink4_noise4', 'sink4'), ('sink4_reenc4', 'reenc4'), ('sink4_reenc4', 'sink4_noise4')]:
         if m in meths and r_ in meths:
             CT[(m, r_)] = [boot_ratio(m, n, k2, ref=r_) for n, k2 in (('resnet', 'fd'), ('vit', 'fd'), ('resnet', 'kid'))]
             c = lambda t: f'{t[0]:.2f} [{t[1]:.2f}, {t[2]:.2f}]'

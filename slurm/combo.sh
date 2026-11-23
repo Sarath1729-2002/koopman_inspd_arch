@@ -22,7 +22,7 @@ mkdir -p logs/combo $OUT
 echo "===== $(date '+%F %T') node $(hostname)"
 python -m vid.oasis_cc --oasis_dir ext/open-oasis --selftest --arm sink4_reenc4 2>&1 | grep -v Warning | tail -3 | cut -c1-300 || { echo "SELFTEST FAILED"; exit 1; }
 RUNS=()
-for arm in sink4 sink4_reenc4 sink4_noise4 sink1 sink1_reenc4; do for v in 0 1 2; do RUNS+=("$arm:$v"); done; done
+for arm in ${COMBO_ARMS:-sink4 sink4_reenc4 sink4_noise4 sink1 sink1_reenc4}; do for v in 0 1 2; do RUNS+=("$arm:$v"); done; done
 echo "${#RUNS[@]} runs"
 for g in 0 1 2 3; do
   ( for ((k = g; k < ${#RUNS[@]}; k += 4)); do
