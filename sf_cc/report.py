@@ -141,6 +141,19 @@ if 'causvid_base' in D and CV:
     if 'causvid_sink3_reenc1' in D and 'causvid_sink3' in D:
         s3 = paired('causvid_sink3_reenc1', 'aesthetic', 'last', 'causvid_sink3'); ok['V3'] = s3[1] > 0
         L.append(f'causvid_sink3_reenc1 vs causvid_sink3, last-10 s aesthetic: {fmt(s3)}')
+    # G (fixed before the run): does the cheap teacher-forced model + inference-time fixes MATCH self-rollout training?
+    #   compare to Self-Forcing (same architecture, trained on its own rollouts), paired by prompt (same prompt & seed)
+    L += ['', '### CausVid + inference-time fixes vs Self-Forcing (the self-rollout-trained model), paired by prompt', '',
+          '| CausVid arm | vs Self-Forcing arm | aesthetic last 10 s | CLIP last | DINO-to-first last | motion last |', '|---|---|---|---|---|---|']
+    for a, r_ in (('causvid_base', 'base'), ('causvid_reenc1', 'base'), ('causvid_sink3', 'sink3'), ('causvid_sink3_reenc1', 'sink3')):
+        if a in D and r_ in D:
+            L.append(f"| {a} | {r_} | {fmt(paired(a, 'aesthetic', 'last', r_))} | {fmt(paired(a, 'clip', 'last', r_))} | "
+                     f"{fmt(paired(a, 'dino_first', 'last', r_))} | {fmt(paired(a, 'flow', 'last', r_))} |")
+    if 'causvid_sink3_reenc1' in D and 'sink3' in D:
+        g = paired('causvid_sink3_reenc1', 'aesthetic', 'last', 'sink3'); gb = paired('causvid_sink3', 'aesthetic', 'last', 'sink3') if 'causvid_sink3' in D else (np.nan,) * 4
+        ok['G'] = g[2] >= 0 and paired('causvid_sink3_reenc1', 'clip', 'last', 'sink3')[0] >= -1.0
+        L.append(f"G: best CausVid pipeline not worse than Self-Forcing + sink (aesthetic CI upper >= 0, CLIP >= -1): "
+                 f"{'PASS' if ok['G'] else 'FAIL'}; gap closed by re-encoding: {gb[0]:+.3f} -> {g[0]:+.3f}")
     L += ['', f"**CausVid test (V1, V2): {'SUPPORTED' if ok.get('V1') and ok.get('V2') else 'NOT SUPPORTED'}**"]
 L += ['', '## Pre-registered criteria', ''] + [f"- {k}: {'PASS' if v else 'FAIL'}" for k, v in ok.items()]
 if any(k in ok for k in ('O1', 'O2', 'O3')):
