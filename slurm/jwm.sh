@@ -11,7 +11,7 @@
 set -uo pipefail
 cd "$SLURM_SUBMIT_DIR"
 module load gcc arrow python/3.10 cuda 2>/dev/null || module load gcc arrow python/3.11 cuda
-source "${JWM_VENV:-$HOME/venvs/jwm}/bin/activate"
+source "${JWM_VENV:-$SCRATCH/venvs/jwm}/bin/activate"
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" PYTHONWARNINGS=ignore OMP_NUM_THREADS=4
 export JEPAWM_DSET=$SCRATCH/jepa_dset JEPAWM_LOGS=$SCRATCH/jepa_logs JEPAWM_CKPT=$SCRATCH/jepa_ckpt JEPAWM_OSSCKPT=$SCRATCH/jepa_ckpt
 export TORCH_HOME=$SCRATCH/torch_jwm HF_HOME=$SCRATCH/hf_jwm HF_HUB_OFFLINE=1
