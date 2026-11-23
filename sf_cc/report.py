@@ -51,7 +51,8 @@ def mean_win(arm, k, which):
 
 
 KNOWN = ['base', 'reenc1', 'reenc2', 'noise1', 'sink3', 'sink3_reenc1', 'sink3_reenc1_cache', 'sink3_reenc2_cache',
-         'ode_base', 'ode_reenc1', 'ode_reenc2', 'ode_noise1']
+         'ode_base', 'ode_reenc1', 'ode_reenc2', 'ode_noise1',
+         'causvid_base', 'causvid_reenc1', 'causvid_reenc2', 'causvid_noise1', 'causvid_sink3', 'causvid_sink3_reenc1']
 order = [a for a in KNOWN if a in D] + [a for a in arms if a not in KNOWN and a in D]
 L = ['# Course correction in Self-Forcing (Wan2.1-T2V-1.3B), 60 s videos (~3x the training length)', '',
      f'Prompts: MovieGenVideoBench (extended prompts for generation, short prompts for CLIP scoring); '
@@ -119,6 +120,28 @@ if CA and 'sink3' in D:
         L.append(f"| {a} | {fmt(paired(a, 'aesthetic', 'last', 'sink3'))} | {fmt(paired(a, 'clip', 'last', 'sink3'))} | "
                  f"{fmt(paired(a, 'flow', 'last', 'sink3'))} | {fmt(paired(a, 'dino_first', 'last', 'sink3'))} |")
     ok['K1'] = any(paired(a, 'aesthetic', 'last', 'sink3')[1] > 0 for a in CA)
+# V1-V3 (fixed before the CausVid run; adds non-collapse guards after the ODE-init lesson):
+#   V1 causvid_reenc1 vs causvid_base: last-10 s aesthetic CI > 0 AND CLIP last >= -1.0 AND DINO-to-first last >= -0.05
+#      (mean paired differences) AND motion last <= 2 x causvid_base's (no freeze / no flicker trade)
+#   V2 control causvid_noise1 vs causvid_base: aesthetic CI includes 0 or is below 0
+#   V3 stacks with the sink: causvid_sink3_reenc1 vs causvid_sink3 last-10 s aesthetic CI > 0
+CV = [a for a in ('causvid_reenc1', 'causvid_reenc2', 'causvid_noise1', 'causvid_sink3', 'causvid_sink3_reenc1') if a in D]
+if 'causvid_base' in D and CV:
+    L += ['', '## CausVid (teacher-forced DMD student, same Wan-1.3B), paired vs causvid_base', '',
+          '| arm | aesthetic last 10 s | CLIP last | motion last | DINO-to-first last |', '|---|---|---|---|---|']
+    for a in CV:
+        L.append(f"| {a} | {fmt(paired(a, 'aesthetic', 'last', 'causvid_base'))} | {fmt(paired(a, 'clip', 'last', 'causvid_base'))} | "
+                 f"{fmt(paired(a, 'flow', 'last', 'causvid_base'))} | {fmt(paired(a, 'dino_first', 'last', 'causvid_base'))} |")
+    if 'causvid_reenc1' in D:
+        r = 'causvid_reenc1'
+        ok['V1'] = paired(r, 'aesthetic', 'last', 'causvid_base')[1] > 0 and paired(r, 'clip', 'last', 'causvid_base')[0] >= -1.0 \
+            and paired(r, 'dino_first', 'last', 'causvid_base')[0] >= -0.05 and mean_win(r, 'flow', 'last') <= 2 * mean_win('causvid_base', 'flow', 'last')
+    if 'causvid_noise1' in D:
+        ok['V2'] = paired('causvid_noise1', 'aesthetic', 'last', 'causvid_base')[1] <= 0
+    if 'causvid_sink3_reenc1' in D and 'causvid_sink3' in D:
+        s3 = paired('causvid_sink3_reenc1', 'aesthetic', 'last', 'causvid_sink3'); ok['V3'] = s3[1] > 0
+        L.append(f'causvid_sink3_reenc1 vs causvid_sink3, last-10 s aesthetic: {fmt(s3)}')
+    L += ['', f"**CausVid test (V1, V2): {'SUPPORTED' if ok.get('V1') and ok.get('V2') else 'NOT SUPPORTED'}**"]
 L += ['', '## Pre-registered criteria', ''] + [f"- {k}: {'PASS' if v else 'FAIL'}" for k, v in ok.items()]
 if any(k in ok for k in ('O1', 'O2', 'O3')):
     L += ['', f"**ODE-init test (O1, O2, O3): {'SUPPORTED' if all(ok.get(k, False) for k in ('O1', 'O2', 'O3')) else 'NOT SUPPORTED'}**"]

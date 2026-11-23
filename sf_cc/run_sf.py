@@ -24,6 +24,8 @@ def arm_cfg(arm):
         elif q.startswith('noise'): c['P'], c['noise'] = int(q[5:]), True
         elif q.startswith('sink'): c['sink'] = int(q[4:])
         elif q == 'ode': c['ckpt'] = 'ode'
+        elif q == 'causvid': c['ckpt'] = 'causvid'   # CausVid (Yin et al. 2025): same Wan-1.3B causal student, DMD-distilled
+                                                    # with teacher-forced (clean) context, i.e. NOT trained on its own rollouts
         elif q == 'cache': c['cache'] = True   # correction goes ONLY into the KV-cache context; the output keeps the original latents
     return c
 
@@ -109,14 +111,28 @@ def build(sink, local=21, ckpt='dmd'):
     from omegaconf import OmegaConf
     from pipeline import CausalInferencePipeline
     cfg = OmegaConf.merge(OmegaConf.load('configs/default_config.yaml'), OmegaConf.load('configs/self_forcing_dmd.yaml'))
+    if ckpt == 'causvid':   # CausVid's own sampler settings (denoising steps, chunk size) from its config
+        cv = os.environ.get('CAUSVID_CFG', os.path.join(os.path.dirname(SF), 'CausVid', 'configs', 'wan_causal_dmd.yaml'))
+        cvc = OmegaConf.load(cv)
+        for k in ('denoising_step_list', 'num_frame_per_block', 'warp_denoising_step', 'context_noise'):
+            if k in cvc:
+                cfg[k] = cvc[k]
+        print('CausVid sampler:', {k: cfg.get(k) for k in ('denoising_step_list', 'num_frame_per_block', 'warp_denoising_step', 'context_noise')}, flush=True)
     cfg.model_kwargs.local_attn_size = local
     cfg.model_kwargs.sink_size = sink
     pipe = CausalInferencePipeline(cfg, device='cuda')
-    f = {'dmd': 'checkpoints/self_forcing_dmd.pt', 'ode': 'checkpoints/ode_init.pt'}[ckpt]
+    f = {'dmd': 'checkpoints/self_forcing_dmd.pt', 'ode': 'checkpoints/ode_init.pt',
+         'causvid': 'checkpoints/causvid/model.pt'}[ckpt]
     sd = torch.load(f, map_location='cpu')
     key = next((k for k in ('generator_ema', 'generator') if k in sd), None)
+    sd = sd[key] if key else sd
     print(f'checkpoint {f} key {key}', flush=True)
-    missing = pipe.generator.load_state_dict(sd[key] if key else sd)
+    tgt = pipe.generator.state_dict().keys()
+    if not set(sd) & set(tgt):   # prefix mismatch between codebases: try adding / stripping 'model.'
+        for cand in ({('model.' + k): v for k, v in sd.items()}, {k[6:] if k.startswith('model.') else k: v for k, v in sd.items()}):
+            if set(cand) & set(tgt):
+                sd = cand; break
+    missing = pipe.generator.load_state_dict(sd, strict=True)
     print('generator load:', missing, flush=True)
     pipe = pipe.to(dtype=torch.bfloat16)
     pipe.text_encoder.to('cuda'); pipe.generator.to('cuda'); pipe.vae.to('cuda')
