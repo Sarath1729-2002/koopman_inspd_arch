@@ -24,15 +24,22 @@ SM=""; for a in $ARMS; do [[ $a == *reenc* ]] && { SM=$a; break; }; done; SM=${S
 CUDA_VISIBLE_DEVICES=0 python -m sf_cc.run_sf --arm $SM --smoke --out results_sf_smoke > logs/sf/smoke_${SLURM_JOB_ID:-0}.log 2>&1
 grep -q "SMOKE OK" logs/sf/smoke_${SLURM_JOB_ID:-0}.log || { echo "SMOKE FAILED"; tail -40 logs/sf/smoke_${SLURM_JOB_ID:-0}.log; exit 1; }
 grep "checkpoint\|generator load\|^\[" logs/sf/smoke_${SLURM_JOB_ID:-0}.log
-lo=${PROMPTS%-*}; hi=${PROMPTS#*-}; mid=$(( (lo + hi) / 2 ))
+lo=${PROMPTS%-*}; hi=${PROMPTS#*-}
+NA=$(echo $ARMS | wc -w); CH=$(( (NL + NA - 1) / NA )); [ $CH -lt 2 ] && CH=2   # split prompts so jobs ~ lanes
 JOBS=()
-for arm in $ARMS; do JOBS+=("$arm:$lo-$mid" "$arm:$((mid + 1))-$hi"); done
+for arm in $ARMS; do
+  n=$((hi - lo + 1)); for ((c = 0; c < CH; c++)); do
+    a0=$((lo + c * n / CH)); a1=$((lo + (c + 1) * n / CH - 1)); [ $a1 -ge $a0 ] && JOBS+=("$arm:$a0-$a1")
+  done
+done
+echo "${#JOBS[@]} jobs on $NL lanes: ${JOBS[*]}"
+GEN=${GEN_MIN:+timeout ${GEN_MIN}m}   # optional wall-clock cap on each generation process so metrics + report still run
 # 2 lanes per GPU (each process ~30 GB), lanes run their share of jobs sequentially
 for ((lane = 0; lane < NL; lane++)); do
   g=$((lane % NG))
   ( for ((k = lane; k < ${#JOBS[@]}; k += NL)); do
       arm=${JOBS[$k]%:*}; pr=${JOBS[$k]#*:}
-      CUDA_VISIBLE_DEVICES=$g python -m sf_cc.run_sf --arm $arm --prompts $pr --latents $LAT --out $OUT \
+      CUDA_VISIBLE_DEVICES=$g $GEN python -m sf_cc.run_sf --arm $arm --prompts $pr --latents $LAT --out $OUT \
         > logs/sf/${arm}_${pr}.log 2>&1 || { echo "[sf] $arm $pr FAILED (exit $?)"; grep -v Warning logs/sf/${arm}_${pr}.log | tail -8; }
     done ) &
 done
