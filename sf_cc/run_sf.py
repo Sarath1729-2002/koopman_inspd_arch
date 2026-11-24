@@ -130,7 +130,7 @@ def stream_decode(wrapper, z):
     frames = []
     for i in range(x.shape[2]):
         px = m.decoder(x[:, :, i:i + 1], feat_cache=cache, feat_idx=[0]).clamp(-1, 1)   # [1, 3, t, H, W]
-        frames.append(((px[0].float() * 0.5 + 0.5) * 255).round().to(torch.uint8).permute(1, 2, 3, 0).cpu())
+        frames.append(((px[0] * 0.5 + 0.5).clamp(0, 1) * 255).to(torch.uint8).permute(1, 2, 3, 0).cpu())   # same rounding as before
     return torch.cat(frames, 0).numpy()
 
 
