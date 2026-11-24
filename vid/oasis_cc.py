@@ -493,6 +493,8 @@ if __name__ == '__main__':
     except Exception as e:
         print('strip failed:', e)
     json.dump(res, open(f_out + '.tmp', 'w')); os.replace(f_out + '.tmp', f_out)
+    if os.environ.get('VID_SAVE_LAT') == '1':   # latents for the Koopman fit (vid/koopman.py), float16
+        np.save(f'{a.out}/{tag}_lat.npy', lat.cpu().numpy().astype(np.float16))
     sh = np.mean(res['shift'], 0)
     print(f'[{tag}] re-encodes/sample {n_re.mean().item():.0f}  shift first/last {sh[1:65].mean():.4f} / {sh[-64:].mean():.4f} '
           f'(floor {floor:.4f})  FD resnet {fd["resnet"][0]:.1f}->{fd["resnet"][-1]:.1f}  vit {fd["vit"][0]:.1f}->{fd["vit"][-1]:.1f}  '

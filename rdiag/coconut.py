@@ -13,6 +13,8 @@ ckpt_lcot/coconut_final.pt.  Step 2: on the test set, with n = 10 (trained), 14 
 Criteria (fixed before the run):
   C1 drift at the last trained thought >= 3 x floor AND AUROC >= 0.6
   C2 some snap variant beats plain Coconut at 14 or 20 thoughts, accuracy CI > 0
+  C3 (added Nov 24, replication check) plain Coconut at 10 thoughts reaches accuracy >= 0.30 (paper ~0.34);
+     --eps 3 retrains with 3 epochs per stage -> ckpt_lcot/coconut_final_e3.pt, results_rdiag/coconut_e3.json
 Writes results_rdiag/coconut.json"""
 import argparse, json, os, sys, types, numpy as np, torch, torch.nn.functional as F
 
@@ -69,11 +71,13 @@ if __name__ == '__main__':
     ap.add_argument('--data', default='data_lcot'); ap.add_argument('--ckpt', default='ckpt_lcot')
     ap.add_argument('--n_test', type=int, default=None); ap.add_argument('--out', default='results_rdiag')
     ap.add_argument('--smoke', action='store_true')
+    ap.add_argument('--eps', type=int, default=1, help='training epochs per stage (1 = the first run; 3 = closer to the paper)')
     a = ap.parse_args()
+    sfx = '' if a.eps == 1 else f'_e{a.eps}'
     dev = 'cuda'
     torch.manual_seed(0)
     tok, model = setup_tokenizer_model('openai-community/gpt2', dev)
-    final = os.path.join(a.ckpt, 'coconut_final.pt')
+    final = os.path.join(a.ckpt, f'coconut_final{sfx}.pt')
     test = encode(tok, load(os.path.join(a.data, 'test.jsonl'), 64 if a.smoke else a.n_test))
     if os.path.exists(final):
         model.load_state_dict(torch.load(final, map_location=dev)); print('loaded', final)
@@ -82,7 +86,7 @@ if __name__ == '__main__':
         if not a.smoke:
             train = encode(tok, load(os.path.join(a.data, 'train.jsonl')))
             args = types.SimpleNamespace(stages=5, c=2, snap='none', k=2, tau=1.0, lr=1e-4, seed=0, batch=128,
-                                         stage0_epochs=2, epochs_per_stage=1, arm='coconut')
+                                         stage0_epochs=2, epochs_per_stage=a.eps, arm='coconut')
             for s in range(1, 6):
                 run_stage(model, tok, train, s, args, dev, [])
             torch.save(model.state_dict(), final); print('saved', final, flush=True)
@@ -113,7 +117,8 @@ if __name__ == '__main__':
         r10 = res['runs']['none_10']
         res['C1'] = bool(r10['drift_over_floor_last'] >= 3 and r10['auroc_wrong'] >= 0.6)
         res['C2'] = any(res['runs'][f'{k}_{n}']['delta_vs_none'][1] > 0 for k in ('hard', 'soft') for n in (14, 20))
-        print('C1', 'PASS' if res['C1'] else 'FAIL', ' C2', 'PASS' if res['C2'] else 'FAIL')
-        os.makedirs(a.out, exist_ok=True); json.dump(res, open(f'{a.out}/coconut.json', 'w'), indent=1)
+        res['C3'] = bool(r10['acc'] >= 0.30)   # faithful-replication check (paper: ~0.34 for GPT-2 Coconut)
+        print('C1', 'PASS' if res['C1'] else 'FAIL', ' C2', 'PASS' if res['C2'] else 'FAIL', ' C3', 'PASS' if res['C3'] else 'FAIL')
+        os.makedirs(a.out, exist_ok=True); json.dump(res, open(f'{a.out}/coconut{sfx}.json', 'w'), indent=1)
     else:
         print('SMOKE OK')
