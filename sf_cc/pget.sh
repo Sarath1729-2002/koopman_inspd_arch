@@ -6,7 +6,7 @@ URL=$1; PART=$2; SHA=$3; N=${4:-8}
 AUTH=(); [ -n "${HF_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer $HF_TOKEN")
 TOTAL=$(curl -sIL "${AUTH[@]}" "$URL" | grep -i '^content-length' | tail -1 | tr -dc 0-9)
 [ -n "$TOTAL" ] || { echo "could not read file size"; exit 1; }
-HAVE=$(stat -c %s "$PART"); REST=$((TOTAL - HAVE)); echo "total $TOTAL have $HAVE rest $REST in $N pieces"
+touch "$PART"; HAVE=$(stat -c %s "$PART"); REST=$((TOTAL - HAVE)); echo "total $TOTAL have $HAVE rest $REST in $N pieces"
 [ $REST -gt 0 ] || { echo "already complete"; }
 CH=$(( (REST + N - 1) / N )); D=$(dirname "$PART")/pieces; mkdir -p "$D"
 for ((i = 0; i < N; i++)); do
@@ -22,4 +22,5 @@ while [ "$(jobs -rp | wc -l)" -gt 0 ]; do
 done
 for ((i = 0; i < N; i++)); do [ -f "$D/$i" ] && cat "$D/$i" >> "$PART"; done
 echo "size $(stat -c %s "$PART") (want $TOTAL)"
-echo "$SHA  $PART" | sha256sum -c - && rm -rf "$D" && echo "DOWNLOAD OK"
+if [ "$SHA" = "-" ]; then [ "$(stat -c %s "$PART")" = "$TOTAL" ] && rm -rf "$D" && echo "DOWNLOAD OK (size check only)"
+else echo "$SHA  $PART" | sha256sum -c - && rm -rf "$D" && echo "DOWNLOAD OK"; fi
