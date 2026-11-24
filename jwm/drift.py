@@ -67,7 +67,9 @@ def build_wm(model_name, dev, pre=None, action_dim=None, proprio_dim=None):
     for key in ('architectures', 'pretrain_dec_path', 'new_path_heads'):
         if isinstance(hc.get(key), dict):
             hc[key].pop('state_head', None)
-    ck = hubconf._get_checkpoint_path(wkey)          # HF cache path (or URL fallback)
+    local = os.path.join(os.environ.get('JEPAWM_CKPT', ''), f'{wkey}.pth.tar')   # pre-fetched by jwm/fetch.sh
+    ck = local if os.path.isfile(local) else hubconf._get_checkpoint_path(wkey)    # else HF cache (or URL fallback)
+    print(f'checkpoint: {ck}', flush=True)
     is_url = str(ck).startswith(('http://', 'https://'))
     folder, ckname = (None, ck) if is_url else (os.path.dirname(ck), os.path.basename(ck))
     mod = importlib.import_module(mk.get('module_name', 'app.vjepa_wm.modelcustom.simu_env_planning.vit_enc_preds'))
