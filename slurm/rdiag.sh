@@ -20,10 +20,10 @@ export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" OMP_NUM_THREADS=4 HF_HOME="$
 mkdir -p logs/rdiag results_rdiag
 echo "===== $(date '+%F %T') node $(hostname)"
 for f in data_lcot/test.jsonl ckpt_lcot/stage0.pt; do [ -e $f ] || echo "MISSING $f"; done
-[[ "${ONLY:-all}" =~ ^(all|ouro)$ ]] && CUDA_VISIBLE_DEVICES=0 python -m rdiag.ouro > logs/rdiag/ouro.log 2>&1 || { echo "[rdiag] ouro FAILED"; tail -15 logs/rdiag/ouro.log; } &
-[[ "${ONLY:-all}" =~ ^(all|coconut)$ ]] && CUDA_VISIBLE_DEVICES=1 python -m rdiag.coconut > logs/rdiag/coconut.log 2>&1 || { echo "[rdiag] coconut FAILED"; tail -15 logs/rdiag/coconut.log; } &
-[[ "${ONLY:-all}" == all ]] && ( CUDA_VISIBLE_DEVICES=2 python -m rdiag.ouro --model ByteDance/Ouro-2.6B --out results_rdiag/o26 > logs/rdiag/ouro26.log 2>&1 \
-    && mv results_rdiag/o26/ouro.json results_rdiag/ouro26.json || echo "[rdiag] ouro-2.6B skipped/failed (see logs/rdiag/ouro26.log)" ) &
+if [[ "${ONLY:-all}" =~ ^(all|ouro)$ ]]; then { CUDA_VISIBLE_DEVICES=0 python -m rdiag.ouro > logs/rdiag/ouro.log 2>&1 || { echo "[rdiag] ouro FAILED"; tail -15 logs/rdiag/ouro.log; }; } & fi
+if [[ "${ONLY:-all}" =~ ^(all|coconut)$ ]]; then { CUDA_VISIBLE_DEVICES=1 python -m rdiag.coconut > logs/rdiag/coconut.log 2>&1 || { echo "[rdiag] coconut FAILED"; tail -15 logs/rdiag/coconut.log; }; } & fi
+if [[ "${ONLY:-all}" == all ]]; then ( CUDA_VISIBLE_DEVICES=2 python -m rdiag.ouro --model ByteDance/Ouro-2.6B --out results_rdiag/o26 > logs/rdiag/ouro26.log 2>&1 \
+    && mv results_rdiag/o26/ouro.json results_rdiag/ouro26.json || echo "[rdiag] ouro-2.6B skipped/failed (see logs/rdiag/ouro26.log)" ) & fi
 wait
-grep -h "^\[\|PASS\|FAIL" logs/rdiag/ouro.log logs/rdiag/coconut.log logs/rdiag/ouro26.log
+grep -h "^\[\|PASS\|FAIL" logs/rdiag/*.log 2>/dev/null
 echo "===== $(date '+%F %T') DONE -> results_rdiag/"
