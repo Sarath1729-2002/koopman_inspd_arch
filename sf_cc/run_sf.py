@@ -8,6 +8,15 @@ Arms (name tokens joined by '_'):
   sinkK         attention sink: keep the first K latent frames in the cache (StreamingLLM / Deep-Forcing-style baseline)
   cache         apply the correction only to the context written into the KV cache; the output video keeps the
                 generated latents (separates "clean context" from "lossy VAE round trip on what the viewer sees")
+  aNN           partial projection: z <- z + NN/100 * (E(D(z)) - z)   (e.g. reenc2_a50)
+  evtK          drift-triggered: re-encode a chunk only when its drift signal > K x the video's own floor
+                (mean drift of its first 2 chunks); e.g. evt2
+  dproj[N]      GENERATOR-manifold projection (no VAE): re-noise the finished chunk to the N-th smallest non-zero
+                denoising timestep (default 1 = smallest) and denoise it once with the model itself. Rationale: a
+                self-forced model's context was trained on its OWN outputs, so the manifold to project onto is the
+                generator's, not the VAE's. One extra generator call per chunk (cheaper than a VAE round trip)
+  stat          statistics anchoring: per-channel latent mean/std pulled halfway back to those of the first 2 chunks
+                (targets slow colour / saturation drift; no model call)
   ode           use checkpoints/ode_init.pt: the SAME causal 4-step student BEFORE Self-Forcing's self-rollout (DMD)
                 training, i.e. a model never trained on its own outputs (tests: does correction substitute for that?)
 Per video we save the mp4 (16 fps) and a json with per-chunk drift signal ||E(D(z)) - z||^2 / ||z||^2 and timings.
@@ -18,7 +27,7 @@ SF = os.path.abspath(os.environ.get('SF_DIR', 'ext/Self-Forcing'))
 
 
 def arm_cfg(arm):
-    c = dict(P=0, noise=False, sink=0, ckpt='dmd', cache=False)
+    c = dict(P=0, noise=False, sink=0, ckpt='dmd', cache=False, alpha=1.0, evt=0.0, dproj=0, stat=False, dpn=False)
     for q in arm.split('_'):
         if q.startswith('reenc'): c['P'] = int(q[5:])
         elif q.startswith('noise'): c['P'], c['noise'] = int(q[5:]), True
@@ -26,7 +35,12 @@ def arm_cfg(arm):
         elif q == 'ode': c['ckpt'] = 'ode'
         elif q == 'causvid': c['ckpt'] = 'causvid'   # CausVid (Yin et al. 2025): same Wan-1.3B causal student, DMD-distilled
                                                     # with teacher-forced (clean) context, i.e. NOT trained on its own rollouts
-        elif q == 'cache': c['cache'] = True   # correction goes ONLY into the KV-cache context; the output keeps the original latents
+        elif q == 'cache': c['cache'] = True
+        elif q.startswith('evt'): c['evt'] = float(q[3:])
+        elif q.startswith('dproj'): c['dproj'] = int(q[5:] or 1)
+        elif q == 'stat': c['stat'] = True
+        elif q == 'dpn': c['dpn'] = True   # control for dproj: random nudge of the same size as the projection's change
+        elif q[0] == 'a' and q[1:].isdigit(): c['alpha'] = int(q[1:]) / 100   # correction goes ONLY into the KV-cache context; the output keeps the original latents
     return c
 
 
@@ -158,7 +172,7 @@ def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4):
             pipe.kv_cache1[b]['global_end_index'] = torch.tensor([0], dtype=torch.long, device=dev)
             pipe.kv_cache1[b]['local_end_index'] = torch.tensor([0], dtype=torch.long, device=dev)
     out = torch.zeros_like(noise)
-    shifts, diag_time = [], 0.0
+    shifts, diag_time, floor, ref, n_act = [], 0.0, [], [], 0
     sv = StreamVAE(pipe.vae)   # one causal decode/encode stream per video, fed every chunk in order
     torch.cuda.synchronize(); t0 = time.time()
     cur = 0
@@ -173,12 +187,24 @@ def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4):
                 x = pipe.scheduler.add_noise(z.flatten(0, 1), torch.randn_like(z.flatten(0, 1)),
                                              nt * torch.ones([B * F_], device=dev, dtype=torch.long)).unflatten(0, z.shape[:2])
         act = c['P'] > 0 and (blk + 1) % c['P'] == 0 and blk > 0
+        if c['stat']:   # statistics anchoring toward the first 2 chunks
+            zf = z.float(); mu = zf.mean(dim=(1, 3, 4), keepdim=True); sd = zf.std(dim=(1, 3, 4), keepdim=True) + 1e-6
+            if blk < 2:
+                ref.append((mu, sd))
+            else:
+                rmu = torch.stack([m for m, _ in ref]).mean(0); rsd = torch.stack([v for _, v in ref]).mean(0)
+                z = (zf + 0.5 * ((zf - mu) / sd * rsd + rmu - zf)).to(z.dtype)
         # the stream must see every chunk to stay causal-consistent, so the round trip runs every chunk;
         # its cost is counted only for arms that use it (act), and excluded otherwise
         z_out = z   # what the viewer sees (unless the correction is also applied to the output)
         torch.cuda.synchronize(); td = time.time()
         zr = sv.roundtrip(z).to(z.dtype)
         s = ((zr.float() - z.float()) ** 2).flatten(1).sum(1) / (z.float() ** 2).flatten(1).sum(1)
+        if blk < 2:
+            floor.append(float(s.mean()))
+        if c['evt'] > 0:
+            act = blk >= 2 and float(s.mean()) > c['evt'] * np.mean(floor)
+        n_act += int(act)
         if blk % diag_every == 0 or act:
             shifts.append([blk, float(s.mean())])
         if True:
@@ -189,10 +215,24 @@ def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4):
                     e = e / e.flatten(1).norm(dim=1).view(-1, 1, 1, 1, 1) * d.view(-1, 1, 1, 1, 1)
                     z = (z.float() + e).to(z.dtype)
                 else:
-                    z = zr
+                    z = (z.float() + c['alpha'] * (zr.float() - z.float())).to(z.dtype)
             torch.cuda.synchronize()
-            if not act and c['P'] == 0:
+            if not act and c['P'] == 0 and c['evt'] == 0:
                 diag_time += time.time() - td
+        if c['dproj'] and blk > 0:   # generator-manifold projection: re-noise to a small t, denoise once
+            nz = [int(v) for v in pipe.denoising_step_list if int(v) > 0]
+            tp = nz[-c['dproj']]
+            zn = pipe.scheduler.add_noise(z.flatten(0, 1), torch.randn_like(z.flatten(0, 1)),
+                                          tp * torch.ones([B * F_], device=dev, dtype=torch.long)).unflatten(0, z.shape[:2])
+            _, zp = pipe.generator(noisy_image_or_video=zn, conditional_dict=cond,
+                                   timestep=torch.ones([B, F_], device=dev, dtype=torch.int64) * tp, kv_cache=pipe.kv_cache1,
+                                   crossattn_cache=pipe.crossattn_cache, current_start=cur * pipe.frame_seq_length)
+            if c['dpn']:
+                d = (zp.float() - z.float()).flatten(1).norm(dim=1)
+                e = torch.randn_like(z, dtype=torch.float32)
+                zp = (z.float() + e / e.flatten(1).norm(dim=1).view(-1, 1, 1, 1, 1) * d.view(-1, 1, 1, 1, 1)).to(z.dtype)
+            z = zp
+            n_act += 1
         out[:, cur:cur + F_] = z_out if c.get('cache') else z
         pipe.generator(noisy_image_or_video=z, conditional_dict=cond,
                        timestep=torch.ones([B, F_], device=dev, dtype=torch.int64) * cfg.context_noise,
@@ -203,7 +243,7 @@ def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4):
     video = pipe.vae.decode_to_pixel(out)
     pipe.vae.model.clear_cache()
     video = ((video * 0.5 + 0.5).clamp(0, 1) * 255).to(torch.uint8)[0].permute(0, 2, 3, 1).cpu().numpy()
-    return video, shifts, gen_time
+    return video, shifts, gen_time, n_act
 
 
 if __name__ == '__main__':
@@ -223,10 +263,10 @@ if __name__ == '__main__':
         f = os.path.join(out, f'{idx:04d}.json')
         if os.path.exists(f) and not a.smoke:
             continue
-        video, shifts, gt = generate(pipe, cfg, ext[idx], n_lat, c, seed=1000 + idx)
+        video, shifts, gt, n_act = generate(pipe, cfg, ext[idx], n_lat, c, seed=1000 + idx)
         write_mp4(os.path.join(out, f'{idx:04d}.mp4'), video)
         json.dump({'arm': a.arm, 'cfg': c, 'idx': idx, 'prompt': short[idx], 'latents': n_lat, 'frames': int(video.shape[0]),
-                   'shift': shifts, 'gen_seconds': gt}, open(f + '.tmp', 'w')); os.replace(f + '.tmp', f)
+                   'shift': shifts, 'gen_seconds': gt, 'n_corrections': n_act}, open(f + '.tmp', 'w')); os.replace(f + '.tmp', f)
         sh = [s for _, s in shifts]
         print(f'[{a.arm}] prompt {idx}: {video.shape[0]} frames in {gt:.0f}s  drift signal first/last '
               f'{(sh[0] if sh else float("nan")):.4f}/{(sh[-1] if sh else float("nan")):.4f}', flush=True)
