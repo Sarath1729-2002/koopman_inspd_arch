@@ -17,6 +17,11 @@ on prompts 0-15, +0.104 [+0.004, +0.216]); fixed BEFORE the confirmation run on 
   R1  sink3_dproj2_cache vs sink3 on prompts 16-31: last-10 s aesthetic CI > 0, with NC
   R2  control sink3_dproj2_dpn vs sink3 on prompts 16-31: aesthetic CI includes 0 or is below 0
   R3  dose: sink3_dproj3_cache (noisier still) reported on all prompts, no pass/fail
+Added Nov 24 after the second pass (4-min CausVid: reenc2_cache +0.088 [+0.006, +0.186] on prompts 0-7, V1 PASS;
+60 s CausVid: evt2 +0.048 [+0.012, +0.092] on prompts 0-15), fixed BEFORE the confirmation runs on FRESH prompts:
+  V2  4 min (results_sf_long): causvid_sink3_reenc2_cache vs causvid_sink3 on prompts 8-23: aesthetic CI > 0, with NC
+  E1  60 s (results_sf): causvid_sink3_evt2 vs causvid_sink3 on prompts 16-31: aesthetic CI > 0, with NC
+  H   horizon (reported, no pass/fail): the same arm's gain at 60 s vs 4 min on the prompts both runs share
 Also reported, no pass/fail: partial projection (a50), drift trigger (evt2), statistics anchoring (stat), colour drift,
 generation time, number of corrections, drift signal."""
 import glob, json, os, sys, numpy as np
@@ -56,16 +61,16 @@ def ref_of(a):
     return pre + ('sink3' if 'sink3' in a else 'base')
 
 
-def mean_ref(a, r, k):
-    cm = sorted(set(D.get(a, {})) & set(D.get(r, {})))
+def mean_ref(a, r, k, lo_idx=0):
+    cm = sorted(i for i in set(D.get(a, {})) & set(D.get(r, {})) if i >= lo_idx)
     return np.mean([stat(D[r][i][0], k) for i in cm]) if cm else np.nan
 
 
-def nc(a, r):
+def nc(a, r, lo_idx=0):
     if a not in D or r not in D:
         return False
-    return paired(a, r, 'clip')[0] >= -0.5 and paired(a, r, 'dino_first')[0] >= -0.03 and \
-        paired(a, r, 'flow')[0] + mean_ref(a, r, 'flow') >= 0.8 * mean_ref(a, r, 'flow')
+    return paired(a, r, 'clip', lo_idx)[0] >= -0.5 and paired(a, r, 'dino_first', lo_idx)[0] >= -0.03 and \
+        paired(a, r, 'flow', lo_idx)[0] + mean_ref(a, r, 'flow', lo_idx) >= 0.8 * mean_ref(a, r, 'flow', lo_idx)
 
 
 f = lambda t: f'{t[0]:+.3f} [{t[1]:+.3f}, {t[2]:+.3f}]'
@@ -114,5 +119,34 @@ if 'sink3_dproj2_cache' in D and 'sink3' in D:
                          f"{f(paired(a, 'sink3', 'flow', 16))} | {f(paired(a, 'sink3', 'colour', 16))} |")
     if 'sink3_dproj2_dpn' in D and paired('sink3_dproj2_dpn', 'sink3', 'aesthetic', 16)[3]:
         ok['R2'] = paired('sink3_dproj2_dpn', 'sink3', 'aesthetic', 16)[1] <= 0
+
+
+def fresh(title, arms, r, lo):
+    rows = [a for a in arms if a in D and paired(a, r, 'aesthetic', lo)[3]]
+    if not rows:
+        return
+    L.extend(['', f'## {title}', '', '| arm | n | aesthetic | CLIP | DINO-to-first | motion | colour drift | NC |', '|---|---|---|---|---|---|---|---|'])
+    for a in rows:
+        L.append(f"| {a} | {paired(a, r, 'aesthetic', lo)[3]} | {f(paired(a, r, 'aesthetic', lo))} | {f(paired(a, r, 'clip', lo))} | "
+                 f"{f(paired(a, r, 'dino_first', lo))} | {f(paired(a, r, 'flow', lo))} | {f(paired(a, r, 'colour', lo))} | {nc(a, r, lo)} |")
+
+
+cv = ['causvid_sink3_reenc2_cache', 'causvid_sink3_reenc2', 'causvid_sink3_evt2', 'causvid_sink3_dproj_cache']
+if 'long' in root:
+    fresh('Confirmation on fresh prompts 8-23 (4 min)', cv, 'causvid_sink3', 8)
+    a = 'causvid_sink3_reenc2_cache'
+    if a in D and paired(a, 'causvid_sink3', 'aesthetic', 8)[3]:
+        ok['V2'] = paired(a, 'causvid_sink3', 'aesthetic', 8)[1] > 0 and nc(a, 'causvid_sink3', 8)
+    ref_drift = [m['shift'][-1][1] for _, m in D.get('causvid_sink3', {}).values() if m['shift']]
+    if ref_drift:
+        L.append(f'\nNo-correction CausVid drift at the end of 4 min: {np.mean(ref_drift):.4f}')
+else:
+    fresh('Confirmation on fresh prompts 16-31 (60 s, CausVid)', cv, 'causvid_sink3', 16)
+    a = 'causvid_sink3_evt2'
+    if a in D and paired(a, 'causvid_sink3', 'aesthetic', 16)[3]:
+        ok['E1'] = paired(a, 'causvid_sink3', 'aesthetic', 16)[1] > 0 and nc(a, 'causvid_sink3', 16)
+    ref_drift = [m['shift'][-1][1] for _, m in D.get('causvid_sink3', {}).values() if m['shift']]
+    if ref_drift:
+        L.append(f'\nNo-correction CausVid drift at the end of 60 s: {np.mean(ref_drift):.4f}')
 L += ['', '## Pre-registered criteria', ''] + [f'- {k}: {"PASS" if v else "FAIL"}' for k, v in ok.items()]
 txt = '\n'.join(L); open(f'{root}/SF_CAMPAIGN.md', 'w').write(txt); print(txt)
