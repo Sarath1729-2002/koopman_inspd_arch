@@ -119,6 +119,21 @@ class StreamVAE:
         return ((mu - mean) / std).permute(0, 2, 1, 3, 4)
 
 
+@torch.no_grad()
+def stream_decode(wrapper, z):
+    """Same computation as Wan's decode_to_pixel (one latent at a time through the causal decoder with its feature
+    cache), but each decoded piece goes to uint8 on the CPU at once, so a 4-minute video never sits on the GPU whole."""
+    m = wrapper.model
+    mean = wrapper.mean.to(z.device, z.dtype).view(1, -1, 1, 1, 1); std = wrapper.std.to(z.device, z.dtype).view(1, -1, 1, 1, 1)
+    x = m.conv2(z.permute(0, 2, 1, 3, 4) * std + mean)
+    cache = [None] * sys.modules[type(m).__module__].count_conv3d(m.decoder)
+    frames = []
+    for i in range(x.shape[2]):
+        px = m.decoder(x[:, :, i:i + 1], feat_cache=cache, feat_idx=[0]).clamp(-1, 1)   # [1, 3, t, H, W]
+        frames.append(((px[0].float() * 0.5 + 0.5) * 255).round().to(torch.uint8).permute(1, 2, 3, 0).cpu())
+    return torch.cat(frames, 0).numpy()
+
+
 def build(sink, local=21, ckpt='dmd'):
     sys.path.insert(0, SF); os.chdir(SF)
     patch_flash_attention()
@@ -240,9 +255,8 @@ def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4):
                        current_start=cur * pipe.frame_seq_length)
         cur += F_
     torch.cuda.synchronize(); gen_time = time.time() - t0 - diag_time
-    video = pipe.vae.decode_to_pixel(out)
+    video = stream_decode(pipe.vae, out)
     pipe.vae.model.clear_cache()
-    video = ((video * 0.5 + 0.5).clamp(0, 1) * 255).to(torch.uint8)[0].permute(0, 2, 3, 1).cpu().numpy()
     return video, shifts, gen_time, n_act
 
 
