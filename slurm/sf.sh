@@ -23,7 +23,7 @@ if [[ " $ARMS" == *" ode"* ]] && [ ! -s ext/Self-Forcing/checkpoints/ode_init.pt
 if [[ " $ARMS" == *" causvid"* ]] && [ ! -s ext/Self-Forcing/checkpoints/causvid/model.pt ]; then
   echo "MISSING ext/Self-Forcing/checkpoints/causvid/model.pt -- download it on the login node first"; exit 1; fi
 echo "===== $(date '+%F %T') node $(hostname)"; nvidia-smi -L
-NG=$(nvidia-smi -L | wc -l); NL=$((2 * NG))
+NG=$(nvidia-smi -L | wc -l); NL=$(( ${LPG:-2} * NG ))   # LPG = processes per GPU (1 for 4-minute videos)
 SM="${SMOKE_ARM:-}"; [ -z "$SM" ] && for a in $ARMS; do [[ $a == *reenc* || $a == *dproj* ]] && { SM=$a; break; }; done; SM=${SM:-${ARMS%% *}}
 CUDA_VISIBLE_DEVICES=0 python -m sf_cc.run_sf --arm $SM --smoke --out results_sf_smoke > logs/sf/smoke_${SLURM_JOB_ID:-0}.log 2>&1
 grep -q "SMOKE OK" logs/sf/smoke_${SLURM_JOB_ID:-0}.log || { echo "SMOKE FAILED"; tail -40 logs/sf/smoke_${SLURM_JOB_ID:-0}.log; exit 1; }
