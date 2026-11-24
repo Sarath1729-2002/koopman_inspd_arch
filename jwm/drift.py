@@ -25,7 +25,9 @@ def load_stubs():
     except Exception as e:
         import types
         print(f'h5py unavailable ({type(e).__name__}); stubbed (not used for Push-T / Wall / PointMaze)', flush=True)
-        sys.modules['h5py'] = types.ModuleType('h5py')
+        import importlib.machinery
+        m = types.ModuleType('h5py'); m.__spec__ = importlib.machinery.ModuleSpec('h5py', None); m.__path__ = []
+        sys.modules['h5py'] = m
     try:   # clusterscope only knows Meta clusters; datasets resolve through $JEPAWM_DSET instead
         import clusterscope
         clusterscope.cluster = lambda *a, **k: 'default'
@@ -33,23 +35,57 @@ def load_stubs():
         pass
 
 
-def load(model_name, dev):
-    load_stubs()
-    import yaml
-    import hubconf
-    from evals.utils import make_datasets
-    from app.vjepa_wm.modelcustom.simu_env_planning.vit_enc_preds import init_module
+def cfg_of(model_name):
+    import yaml, hubconf
     from src.utils.yaml_utils import expand_env_vars
     cfg_rel, wkey = hubconf._MODEL_CONFIGS[model_name]
-    a = expand_env_vars(yaml.safe_load(open(os.path.join(JW, cfg_rel))))
-    mk = a['model_kwargs']
+    return expand_env_vars(yaml.safe_load(open(os.path.join(JW, cfg_rel))))['model_kwargs'], wkey
+
+
+def build_wm(model_name, dev, pre=None, action_dim=None, proprio_dim=None):
+    """Same construction as jepa-wms hubconf, but without importing the simulator stack (gym, envs).
+    pre/action_dim/proprio_dim default to the hard-coded per-env stats (DATA_STATS), as in hubconf."""
+    import importlib, torch as T, hubconf
+    mk, wkey = cfg_of(model_name)
+    if pre is None:
+        from app.plan_common.datasets import get_data_stats
+        from app.plan_common.datasets.preprocessor import Preprocessor
+        from app.plan_common.datasets.transforms import make_inverse_transforms, make_transforms
+        st = get_data_stats(model_name.split('_')[-1])
+        action_dim, proprio_dim = st['action_dim'], st['proprio_dim']
+        aug = mk.get('data_aug', {}); img = mk['data'].get('img_size', 224)
+        tr = make_transforms(img_size=img, normalize=aug.get('normalize', [[0.485, 0.456, 0.406], [0.229, 0.224, 0.225]]),
+                             random_horizontal_flip=False, random_resize_aspect_ratio=(1.0, 1.0), random_resize_scale=(1.0, 1.0),
+                             reprob=0.0, auto_augment=False, motion_shift=False)
+        pre = Preprocessor(action_mean=T.tensor(st['action_mean']), action_std=T.tensor(st['action_std']),
+                           state_mean=T.tensor(st['state_mean']), state_std=T.tensor(st['state_std']),
+                           proprio_mean=T.tensor(st['proprio_mean']), proprio_std=T.tensor(st['proprio_std']),
+                           transform=tr, inverse_transform=make_inverse_transforms(img_size=img, **aug))
+    import copy
+    pk = copy.deepcopy(mk['pretrain_kwargs'])        # drop the state-readout head: its checkpoint is not released
+    hc = pk.get('heads_cfg', {})                     # (configs point to a local ${JEPAWM_LOGS} path); unused here
+    for key in ('architectures', 'pretrain_dec_path', 'new_path_heads'):
+        if isinstance(hc.get(key), dict):
+            hc[key].pop('state_head', None)
+    ck = hubconf._get_checkpoint_path(wkey)          # HF cache path (or URL fallback)
+    is_url = str(ck).startswith(('http://', 'https://'))
+    folder, ckname = (None, ck) if is_url else (os.path.dirname(ck), os.path.basename(ck))
+    mod = importlib.import_module(mk.get('module_name', 'app.vjepa_wm.modelcustom.simu_env_planning.vit_enc_preds'))
+    wm = mod.init_module(folder=folder, checkpoint=ckname, model_kwargs=pk,
+                         wrapper_kwargs=mk.get('wrapper_kwargs', {}), cfgs_data=mk['data'], device=dev,
+                         action_dim=action_dim, proprio_dim=proprio_dim, preprocessor=pre)
+    wm.eval()
+    return wm, pre, mk
+
+
+def load(model_name, dev):
+    load_stubs()
+    from evals.utils import make_datasets
+    mk, _ = cfg_of(model_name)
     cwd = os.getcwd(); os.chdir(JW)
     dset, pre = make_datasets(mk['data'], mk['data_aug'], filter_first_episodes=10 ** 6)
     os.chdir(cwd)
-    wm = init_module(folder=None, checkpoint=hubconf._get_checkpoint_path(wkey), model_kwargs=mk['pretrain_kwargs'],
-                     wrapper_kwargs=mk.get('wrapper_kwargs', {}), cfgs_data=mk['data'], device=dev,
-                     action_dim=dset.action_dim, proprio_dim=dset.proprio_dim, preprocessor=pre)
-    wm.eval()
+    wm, pre, mk = build_wm(model_name, dev, pre, dset.action_dim, dset.proprio_dim)
     fs = mk['data']['custom'].get('frameskip', 1)
     rs = mk['pretrain_kwargs'].get('rollout_cfg', {}).get('rollout_steps', 1)
     return wm, dset, pre, fs, rs
@@ -59,23 +95,20 @@ def episodes(dset, pre, fs, T, n, rng):
     """(visual uint8-range float [N, T+1, C, H, W], raw proprio [N, T+1, P], normalized actions [N, T, fs*A])"""
     L = []
     for i in range(len(dset)):
-        try:
-            L.append(dset.get_seq_length(i))
-        except Exception:
-            L.append(len(dset[i][1]))
+        L.append(int(dset.get_seq_length(i)))
     need = (T + 1) * fs
     ok = [i for i, l in enumerate(L) if l >= need]
     print(f'{len(ok)}/{len(L)} validation episodes long enough for T={T} (need {need} env steps)', flush=True)
     ok = list(rng.permutation(ok))[:n]
     V, Pp, A = [], [], []
+    base = getattr(dset, 'dataset', dset)                     # validation split is a TrajSubset of the full dataset
     for i in ok:
-        obs, act = dset[i][0], dset[i][1]
+        j = dset.indices[i] if hasattr(dset, 'indices') else i
         s = int(rng.integers(0, L[i] - need + 1))
-        idx = list(range(s, s + need, fs))[:T + 1]
-        vis = pre.inverse_transform(obs['visual'][idx].cpu()) * 255.0
-        V.append(vis.clamp(0, 255)); Pp.append(pre.denormalize_proprios(obs['proprio'][idx].cpu()))
-        a = act[s:s + T * fs]
-        A.append(a.reshape(T, -1))
+        obs, act = base.get_frames(j, list(range(s, s + need)))[:2]   # only the frames needed (not the whole episode)
+        vis = pre.inverse_transform(obs['visual'][::fs][:T + 1].cpu()) * 255.0
+        V.append(vis.clamp(0, 255)); Pp.append(pre.denormalize_proprios(obs['proprio'][::fs][:T + 1].cpu()))
+        A.append(act[:T * fs].reshape(T, -1))
     return torch.stack(V), torch.stack(Pp), torch.stack(A)
 
 
@@ -131,9 +164,8 @@ if __name__ == '__main__':
     a = ap.parse_args()
     if a.cache_only:   # same path as torch.hub.load: checkpoint (HF), decoder head, DINOv2 -- all into local caches
         load_stubs()
-        import hubconf
-        hubconf._load_model(a.model, device='cpu')
-        print(f'CACHED {a.model}', flush=True); raise SystemExit
+        wm, _, _ = build_wm(a.model, torch.device('cpu'))
+        print(f'CACHED {a.model} (action dim {wm.action_dim}, ctxt {wm.ctxt_window})', flush=True); raise SystemExit
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     torch.manual_seed(0); rng = np.random.default_rng(0)
     wm, dset, pre, fs, rsteps = load(a.model, dev)
