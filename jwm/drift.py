@@ -20,6 +20,12 @@ JW = os.path.abspath(os.environ.get('JEPAWM_DIR', 'ext/jepa-wms'))
 
 def load(model_name, dev):
     sys.path.insert(0, JW)
+    try:   # h5py is only needed by the RoboCasa loader; on this cluster it can clash with opencv's HDF5 build
+        import h5py  # noqa: F401
+    except Exception as e:
+        import types
+        print(f'h5py unavailable ({type(e).__name__}); stubbed (not used for Push-T / Wall / PointMaze)', flush=True)
+        sys.modules['h5py'] = types.ModuleType('h5py')
     try:   # clusterscope only knows Meta clusters; datasets resolve through $JEPAWM_DSET instead
         import clusterscope
         clusterscope.cluster = lambda *a, **k: 'default'
