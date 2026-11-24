@@ -12,6 +12,11 @@ Windows = first / last 10 s; 95% bootstrap CIs over prompts. Criteria fixed BEFO
   X   matching principle (60 s, cache-only, with sink): (SF dproj - SF reenc2) - (CausVid dproj - CausVid reenc2) > 0,
       last-10 s aesthetic, CI excluding 0 -- each model gains most from projecting onto the manifold its context
       was trained on (own outputs for Self-Forcing, VAE latents for CausVid)
+Added Nov 24 after the first pass (sink3_dproj2_cache, a noisier re-noising level, was the best of 7 Self-Forcing arms
+on prompts 0-15, +0.104 [+0.004, +0.216]); fixed BEFORE the confirmation run on FRESH prompts 16-31:
+  R1  sink3_dproj2_cache vs sink3 on prompts 16-31: last-10 s aesthetic CI > 0, with NC
+  R2  control sink3_dproj2_dpn vs sink3 on prompts 16-31: aesthetic CI includes 0 or is below 0
+  R3  dose: sink3_dproj3_cache (noisier still) reported on all prompts, no pass/fail
 Also reported, no pass/fail: partial projection (a50), drift trigger (evt2), statistics anchoring (stat), colour drift,
 generation time, number of corrections, drift signal."""
 import glob, json, os, sys, numpy as np
@@ -36,8 +41,8 @@ def stat(m, k):
     return win(m, k, 'last')
 
 
-def paired(a, r, k):
-    cm = sorted(set(D.get(a, {})) & set(D.get(r, {})))
+def paired(a, r, k, lo_idx=0):
+    cm = sorted(i for i in set(D.get(a, {})) & set(D.get(r, {})) if i >= lo_idx)
     if not cm:
         return (np.nan, np.nan, np.nan, 0)
     d = np.array([stat(D[a][i][0], k) - stat(D[r][i][0], k) for i in cm])
@@ -95,5 +100,19 @@ if all(a in D for a in X):
     bs = [d[rng.integers(0, len(d), len(d))].mean() for _ in range(5000)]; lo, hi = np.percentile(bs, [2.5, 97.5])
     ok['X'] = lo > 0
     L += ['', f'Matching principle X: (SF dproj - SF reenc2) - (CausVid dproj - CausVid reenc2) = {d.mean():+.3f} [{lo:+.3f}, {hi:+.3f}] (n={len(d)})']
+if 'sink3_dproj2_cache' in D and 'sink3' in D:
+    r1 = paired('sink3_dproj2_cache', 'sink3', 'aesthetic', 16)
+    if r1[3]:
+        nc16 = paired('sink3_dproj2_cache', 'sink3', 'clip', 16)[0] >= -0.5 and paired('sink3_dproj2_cache', 'sink3', 'dino_first', 16)[0] >= -0.03 \
+            and paired('sink3_dproj2_cache', 'sink3', 'flow', 16)[0] >= -0.2 * np.mean([stat(D['sink3'][i][0], 'flow') for i in D['sink3'] if i >= 16])
+        ok['R1'] = r1[1] > 0 and nc16
+        L += ['', '## Confirmation on fresh prompts 16-31', '', '| arm | n | aesthetic | CLIP | DINO-to-first | motion | colour drift |', '|---|---|---|---|---|---|---|']
+        for a in ('sink3_dproj2_cache', 'sink3_dproj2_dpn', 'sink3_dproj3_cache'):
+            if a in D:
+                p = paired(a, 'sink3', 'aesthetic', 16)
+                L.append(f"| {a} | {p[3]} | {f(p)} | {f(paired(a, 'sink3', 'clip', 16))} | {f(paired(a, 'sink3', 'dino_first', 16))} | "
+                         f"{f(paired(a, 'sink3', 'flow', 16))} | {f(paired(a, 'sink3', 'colour', 16))} |")
+    if 'sink3_dproj2_dpn' in D and paired('sink3_dproj2_dpn', 'sink3', 'aesthetic', 16)[3]:
+        ok['R2'] = paired('sink3_dproj2_dpn', 'sink3', 'aesthetic', 16)[1] <= 0
 L += ['', '## Pre-registered criteria', ''] + [f'- {k}: {"PASS" if v else "FAIL"}' for k, v in ok.items()]
 txt = '\n'.join(L); open(f'{root}/SF_CAMPAIGN.md', 'w').write(txt); print(txt)
