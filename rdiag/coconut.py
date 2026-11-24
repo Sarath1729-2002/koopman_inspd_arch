@@ -17,10 +17,10 @@ Writes results_rdiag/coconut.json"""
 import argparse, json, os, sys, types, numpy as np, torch, torch.nn.functional as F
 
 try:
-    from lcot.model import setup_tokenizer_model, latent_rollout, greedy
-    from lcot.train import encode, load, pad, parse, correct, run_stage
+    from rdiag.lcot.model import setup_tokenizer_model, latent_rollout, greedy
+    from rdiag.lcot.train import encode, load, pad, parse, correct, run_stage
 except ImportError as e:
-    raise SystemExit(f'lcot/ (from latent_snap.tgz) not found in this folder: {e}')
+    raise SystemExit(f'could not import the latent-CoT code: {e}')
 
 
 def snapv(model, h, kind):

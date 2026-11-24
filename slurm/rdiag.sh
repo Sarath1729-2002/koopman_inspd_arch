@@ -19,7 +19,7 @@ source "${VENV:-$HOME/venvs/ouro}/bin/activate"
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" OMP_NUM_THREADS=4 HF_HOME="${RD_HF_HOME:-$SCRATCH/hf}" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 mkdir -p logs/rdiag results_rdiag
 echo "===== $(date '+%F %T') node $(hostname)"
-for f in lcot/model.py data_lcot/test.jsonl ckpt_lcot/stage0.pt; do [ -e $f ] || echo "MISSING $f"; done
+for f in data_lcot/test.jsonl ckpt_lcot/stage0.pt; do [ -e $f ] || echo "MISSING $f"; done
 CUDA_VISIBLE_DEVICES=0 python -m rdiag.ouro > logs/rdiag/ouro.log 2>&1 || { echo "[rdiag] ouro FAILED"; tail -15 logs/rdiag/ouro.log; } &
 CUDA_VISIBLE_DEVICES=1 python -m rdiag.coconut > logs/rdiag/coconut.log 2>&1 || { echo "[rdiag] coconut FAILED"; tail -15 logs/rdiag/coconut.log; } &
 ( CUDA_VISIBLE_DEVICES=2 python -m rdiag.ouro --model ByteDance/Ouro-2.6B --out results_rdiag/o26 > logs/rdiag/ouro26.log 2>&1 \
