@@ -18,7 +18,7 @@ import argparse, json, os, sys, time, numpy as np, torch
 JW = os.path.abspath(os.environ.get('JEPAWM_DIR', 'ext/jepa-wms'))
 
 
-def load(model_name, dev):
+def load_stubs():
     sys.path.insert(0, JW)
     try:   # h5py is only needed by the RoboCasa loader; on this cluster it can clash with opencv's HDF5 build
         import h5py  # noqa: F401
@@ -31,8 +31,11 @@ def load(model_name, dev):
         clusterscope.cluster = lambda *a, **k: 'default'
     except Exception:
         pass
+
+
+def load(model_name, dev):
+    load_stubs()
     import yaml
-    from einops import rearrange  # noqa: F401
     import hubconf
     from evals.utils import make_datasets
     from app.vjepa_wm.modelcustom.simu_env_planning.vit_enc_preds import init_module
@@ -43,7 +46,7 @@ def load(model_name, dev):
     cwd = os.getcwd(); os.chdir(JW)
     dset, pre = make_datasets(mk['data'], mk['data_aug'], filter_first_episodes=10 ** 6)
     os.chdir(cwd)
-    wm = init_module(folder=None, checkpoint=hubconf.MODEL_URLS[wkey], model_kwargs=mk['pretrain_kwargs'],
+    wm = init_module(folder=None, checkpoint=hubconf._get_checkpoint_path(wkey), model_kwargs=mk['pretrain_kwargs'],
                      wrapper_kwargs=mk.get('wrapper_kwargs', {}), cfgs_data=mk['data'], device=dev,
                      action_dim=dset.action_dim, proprio_dim=dset.proprio_dim, preprocessor=pre)
     wm.eval()
@@ -124,7 +127,13 @@ if __name__ == '__main__':
     ap.add_argument('--arms', default='none,reenc1,reenc2,reenc4,noise1,oracle4')
     ap.add_argument('--out', default='results_jwm'); ap.add_argument('--smoke', action='store_true')
     ap.add_argument('--load_only', action='store_true', help='download/cache weights + data check, then exit')
+    ap.add_argument('--cache_only', action='store_true', help='login node: download weights only (no dataset)')
     a = ap.parse_args()
+    if a.cache_only:   # same path as torch.hub.load: checkpoint (HF), decoder head, DINOv2 -- all into local caches
+        load_stubs()
+        import hubconf
+        hubconf._load_model(a.model, device='cpu')
+        print(f'CACHED {a.model}', flush=True); raise SystemExit
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     torch.manual_seed(0); rng = np.random.default_rng(0)
     wm, dset, pre, fs, rsteps = load(a.model, dev)
