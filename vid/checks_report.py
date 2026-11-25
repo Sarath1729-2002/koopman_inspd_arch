@@ -87,7 +87,8 @@ for tag in ('', '_26'):
     det = {'N1': lambda: f"beats {o2['nulls']['u_better_than_random_frac']:.0%} random, {o2['nulls']['u_better_than_shuffled_frac']:.0%} shuffled",
            'N2': lambda: f"u - mean {o2['N2_detail'][0]:+.4f}", 'N3': lambda: f"u - raw {o2['N3_detail'][0]:+.4f}",
            'U1': lambda: '; '.join(f"{k}: {v['steered'][0]:.4f} vs d4 {v['unsteered_depth4'][0]:.4f}" for k, v in o2['U1_detail'].items()),
-           'U2': lambda: str({k: (round(v, 3) if isinstance(v, float) else round(v[0], 3)) for k, v in o2['U2_detail'].items()}),
+           'U2': lambda: '; '.join(f"{k} {v:.3f}" if isinstance(v, float) else f"{k} {v[0]:+.3f} [{v[1]:+.3f}, {v[2]:+.3f}]"
+                          for k, v in o2['U2_detail'].items() if isinstance(v, (float, list))),
            'KP1': lambda: f"cos kmode {o2['cos_with_u']['kmode']:+.2f}, katt {o2['cos_with_u']['katt']:+.2f}, rho {o2['koopman']['rho']:.3f}",
            'KP2': lambda: f"kmode {o2['steer_vs_none']['kmode'][0]:+.4f}, katt {o2['steer_vs_none']['katt'][0]:+.4f} vs none",
            'A1': lambda: f"step Spearman {o2['step_spearman_beyond4']:+.2f}, entropy d4/d8 {o2['dynamics']['4']['entropy']:.3f}/{o2['dynamics']['8']['entropy']:.3f}" if '4' in o2['dynamics'] else '',
