@@ -99,6 +99,8 @@ if __name__ == '__main__':
             fj = mp4[:-4] + '.metrics.json'
             if os.path.exists(fj):
                 continue
+            if not os.path.exists(mp4[:-4] + '.json'):   # video from an interrupted run (no meta): skip it
+                print('skip (no meta):', mp4, flush=True); continue
             meta = json.load(open(mp4[:-4] + '.json'))
             m = video_metrics(M, read_frames(mp4), meta['prompt'], dev)
             json.dump(m, open(fj + '.tmp', 'w')); os.replace(fj + '.tmp', fj)
