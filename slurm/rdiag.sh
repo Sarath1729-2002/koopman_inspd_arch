@@ -14,6 +14,8 @@
 #SBATCH --output=logs/%x-%j.out
 set -uo pipefail
 cd "$SLURM_SUBMIT_DIR"
+# drop any venv inherited from the submitting shell (sbatch copies the environment)
+unset VIRTUAL_ENV PYTHONHOME; PATH=$(echo "$PATH" | tr ':' '\n' | grep -v '/venvs/' | paste -sd: -)
 module load gcc arrow python/3.11 cuda
 source "${VENV:-$HOME/venvs/ouro}/bin/activate"
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" OMP_NUM_THREADS=4 HF_HOME="${RD_HF_HOME:-$SCRATCH/hf}" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
