@@ -22,6 +22,11 @@ Added Nov 24 after the second pass (4-min CausVid: reenc2_cache +0.088 [+0.006, 
   V2  4 min (results_sf_long): causvid_sink3_reenc2_cache vs causvid_sink3 on prompts 8-23: aesthetic CI > 0, with NC
   E1  60 s (results_sf): causvid_sink3_evt2 vs causvid_sink3 on prompts 16-31: aesthetic CI > 0, with NC
   H   horizon (reported, no pass/fail): the same arm's gain at 60 s vs 4 min on the prompts both runs share
+Added Nov 25 (Self-Forcing drift at 4 min is 4.7x its floor, far above CausVid's 1.4x, but no VAE re-encode arm was
+run there; band-limited re-encoding after FreqForcing), fixed BEFORE the run (results_sf_long, prompts 0-15):
+  S4  sink3_reenc2_cache vs sink3 at 4 min: aesthetic CI > 0, with NC  (the drift rule predicts PASS)
+  B1  band-limited beats plain re-encode on the same model: causvid_sink3_reenc2_cache_blo vs causvid_sink3_reenc2_cache
+      OR sink3_reenc2_cache_blo vs sink3_reenc2_cache, aesthetic paired CI > 0, and the blo arm passes NC vs its sink
 Also reported, no pass/fail: partial projection (a50), drift trigger (evt2), statistics anchoring (stat), colour drift,
 generation time, number of corrections, drift signal."""
 import glob, json, os, sys, numpy as np
@@ -140,6 +145,21 @@ if 'long' in root:
     ref_drift = [m['shift'][-1][1] for _, m in D.get('causvid_sink3', {}).values() if m['shift']]
     if ref_drift:
         L.append(f'\nNo-correction CausVid drift at the end of 4 min: {np.mean(ref_drift):.4f}')
+    if 'sink3_reenc2_cache' in D and 'sink3' in D:
+        ok['S4'] = paired('sink3_reenc2_cache', 'sink3', 'aesthetic')[1] > 0 and nc('sink3_reenc2_cache', 'sink3')
+    L += ['', '## Band-limited vs plain re-encode (same model, paired)', '', '| arm | vs | n | aesthetic | CLIP | DINO-to-first | motion | colour drift |', '|---|---|---|---|---|---|---|---|']
+    b1 = []
+    for a_, r_, s_ in (('causvid_sink3_reenc2_cache_blo', 'causvid_sink3_reenc2_cache', 'causvid_sink3'),
+                       ('causvid_sink3_reenc2_cache_bhi', 'causvid_sink3_reenc2_cache', 'causvid_sink3'),
+                       ('sink3_reenc2_cache_blo', 'sink3_reenc2_cache', 'sink3')):
+        if a_ in D and r_ in D:
+            p = paired(a_, r_, 'aesthetic')
+            L.append(f"| {a_} | {r_} | {p[3]} | {f(p)} | {f(paired(a_, r_, 'clip'))} | {f(paired(a_, r_, 'dino_first'))} | "
+                     f"{f(paired(a_, r_, 'flow'))} | {f(paired(a_, r_, 'colour'))} |")
+            if a_.endswith('blo'):
+                b1.append(p[1] > 0 and nc(a_, s_))
+    if b1:
+        ok['B1'] = any(b1)
 else:
     fresh('Confirmation on fresh prompts 16-31 (60 s, CausVid)', cv, 'causvid_sink3', 16)
     a = 'causvid_sink3_evt2'

@@ -10,6 +10,9 @@ G2 period from regrowth. In sink4_reenc8 / sink4_reenc16 (validation offsets), d
    since the last correction (frames >= 64). Predicted period P_pred = smallest k with drift(k) >= 2 x drift(1).
    Pass if P_pred is within a factor 2 of the best period from the validation FD sweep (sink4_reencP, mean ResNet FD over
    bins starting at frame >= 256; lower is better).
+G3 (added Nov 25) a linear model of the ERROR, not the state: fit e_{t+1} = lam * e_t + b on the FIRST HALF of each
+   uncorrected Oasis rollout (16-frame bins) and forecast the level it settles at, b / (1 - lam). Pass if, in >= 70% of
+   rollouts with 0 < lam < 1, the forecast is within 25% of the observed mean drift over the last quarter.
 Writes results_growth.json"""
 import glob, json, os, re, sys, numpy as np
 
@@ -97,6 +100,22 @@ if __name__ == '__main__':
               f"exp rate {s['exp_rate_median'][0]:+.4f} [{s['exp_rate_median'][1]:+.4f}, {s['exp_rate_median'][2]:+.4f}]/step  "
               f"last/floor {s['drift_last_over_floor']:.2f}  exp? {'PASS' if s['pass'] else 'FAIL'}")
     out['G1_pass'] = out['G1'].get('oasis_base', {}).get('pass')
+    errs, lams = [], []
+    for t, y, fl in fams['oasis_base']:
+        h = len(y) // 2
+        if h < 4:
+            continue
+        lam, b = np.polyfit(y[:h - 1], y[1:h], 1)
+        lams.append(float(lam))
+        if 0 < lam < 1:
+            errs.append(abs(b / (1 - lam) - y[-max(1, len(y) // 4):].mean()) / y[-max(1, len(y) // 4):].mean())
+    if lams:
+        out['G3'] = {'n': len(lams), 'n_stable': len(errs), 'lam_median': float(np.median(lams)),
+                     'forecast_rel_err_median': float(np.median(errs)) if errs else None,
+                     'frac_within_25pct': float(np.mean(np.array(errs) <= 0.25)) if errs else 0.0}
+        out['G3_pass'] = bool(errs and out['G3']['frac_within_25pct'] >= 0.7)
+        print(f"G3 error model on Oasis: lam median {out['G3']['lam_median']:.3f} ({len(errs)}/{len(lams)} stable), "
+              f"forecast of the settling level within 25% in {out['G3']['frac_within_25pct']:.0%}  (median error {out['G3']['forecast_rel_err_median']})")
     # G2
     fd = {}
     for f in glob.glob('results_val/sink4_reenc*_v*.json'):
@@ -129,7 +148,7 @@ if __name__ == '__main__':
             if 'P_pred' not in out['G2']:
                 out['G2']['P_pred'] = Pp if Pp else f'>{P}'
                 out['G2_pass'] = bool(Pp is not None and Pbest / 2 <= Pp <= 2 * Pbest)
-    for k in ('G1_pass', 'G2_pass'):
+    for k in ('G1_pass', 'G2_pass', 'G3_pass'):
         if k in out:
             print(k[:2], 'PASS' if out[k] else 'FAIL')
     json.dump(out, open('results_growth.json', 'w'), indent=1)

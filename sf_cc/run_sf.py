@@ -17,6 +17,9 @@ Arms (name tokens joined by '_'):
                 generator's, not the VAE's. One extra generator call per chunk (cheaper than a VAE round trip)
   stat          statistics anchoring: per-channel latent mean/std pulled halfway back to those of the first 2 chunks
                 (targets slow colour / saturation drift; no model call)
+  blo / bhi     band-limited re-encode (Nov 25, after FreqForcing's low/high-frequency split): blo takes only the
+                LOW spatial frequencies of E(D(z)) (colour, layout) and keeps the model's own high frequencies (detail,
+                motion); bhi the reverse. Low = 5x5 box blur over each latent frame
   ode           use checkpoints/ode_init.pt: the SAME causal 4-step student BEFORE Self-Forcing's self-rollout (DMD)
                 training, i.e. a model never trained on its own outputs (tests: does correction substitute for that?)
 Per video we save the mp4 (16 fps) and a json with per-chunk drift signal ||E(D(z)) - z||^2 / ||z||^2 and timings.
@@ -27,7 +30,7 @@ SF = os.path.abspath(os.environ.get('SF_DIR', 'ext/Self-Forcing'))
 
 
 def arm_cfg(arm):
-    c = dict(P=0, noise=False, sink=0, ckpt='dmd', cache=False, alpha=1.0, evt=0.0, dproj=0, stat=False, dpn=False)
+    c = dict(P=0, noise=False, sink=0, ckpt='dmd', cache=False, alpha=1.0, evt=0.0, dproj=0, stat=False, dpn=False, band=None)
     for q in arm.split('_'):
         if q.startswith('reenc'): c['P'] = int(q[5:])
         elif q.startswith('noise'): c['P'], c['noise'] = int(q[5:]), True
@@ -39,9 +42,21 @@ def arm_cfg(arm):
         elif q.startswith('evt'): c['evt'] = float(q[3:])
         elif q.startswith('dproj'): c['dproj'] = int(q[5:] or 1)
         elif q == 'stat': c['stat'] = True
+        elif q in ('blo', 'bhi'): c['band'] = q[1:]
         elif q == 'dpn': c['dpn'] = True   # control for dproj: random nudge of the same size as the projection's change
         elif q[0] == 'a' and q[1:].isdigit(): c['alpha'] = int(q[1:]) / 100   # correction goes ONLY into the KV-cache context; the output keeps the original latents
     return c
+
+
+def band_mix(z, zr, band):
+    """z, zr [B, F, C, h, w]: low spatial frequencies from one, high from the other"""
+    if band is None:
+        return zr
+    import torch.nn.functional as Fn
+    sh = z.shape
+    lo = lambda x: Fn.avg_pool2d(x.float().flatten(0, 1), 5, 1, 2, count_include_pad=False).view(sh)
+    zl, rl = lo(z), lo(zr)
+    return (rl + (z.float() - zl)) if band == 'lo' else (zl + (zr.float() - rl))
 
 
 def write_mp4(path, frames_u8, fps=16):
@@ -230,7 +245,8 @@ def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4):
                     e = e / e.flatten(1).norm(dim=1).view(-1, 1, 1, 1, 1) * d.view(-1, 1, 1, 1, 1)
                     z = (z.float() + e).to(z.dtype)
                 else:
-                    z = (z.float() + c['alpha'] * (zr.float() - z.float())).to(z.dtype)
+                    zb = band_mix(z, zr, c['band']).float()
+                    z = (z.float() + c['alpha'] * (zb - z.float())).to(z.dtype)
             torch.cuda.synchronize()
             if not act and c['P'] == 0 and c['evt'] == 0:
                 diag_time += time.time() - td

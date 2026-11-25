@@ -32,6 +32,17 @@ if g:
     if 'G2_pass' in g:
         row('G2', 'regrowth after a correction predicts the best period', g['G2_pass'],
             f"P_pred {g['G2'].get('P_pred')} vs best {g['G2'].get('P_best')} (FD {g['G2'].get('fd_by_period')})")
+if g and 'G3' in g:
+    row('G3', 'a linear error model forecasts where Oasis drift settles', g.get('G3_pass'),
+        f"lam {g['G3']['lam_median']:.3f}, within 25% in {g['G3']['frac_within_25pct']:.0%}")
+for root, keys in (('results_sf_long/SF_CAMPAIGN.md', ('S4', 'B1')),):
+    if os.path.exists(root):
+        t = open(root).read()
+        for k in keys:
+            m_ = re.search(rf'- {k}: (PASS|FAIL)', t)
+            if m_:
+                row(k, {'S4': 'Self-Forcing 4 min: re-encode helps (drift 4.7x)', 'B1': 'band-limited beats plain re-encode'}[k],
+                    m_.group(1) == 'PASS', f'see {root}')
 for arm in ('base', 'sink4'):
     k = j(f'results_koop/koopman_{arm}.json')
     if k:
@@ -62,4 +73,32 @@ if o:
     h = o['OH1_detail']
     row('OH1', 'drift as a stopping signal beats fixed 4 loops', o['OH1'],
         f"NLL stop {h['nll_stop'][0]:.4f} vs fixed-4 {h['nll_fixed4'][0]:.4f} vs oracle {h['nll_oracle'][0]:.4f}")
+for tag in ('', '_26'):
+    o2 = j(f'results_rdiag/odir2{tag}.json')
+    if not o2:
+        continue
+    lab = 'Ouro-2.6B' if tag else 'Ouro-1.4B'
+    q = {'N1': 'u beats 50 random + 20 shuffled-label directions', 'N2': 'u beats label-free mean drift direction',
+         'N3': 'off-manifold u beats raw-state direction', 'U1': 'steered loop 5/6 beats plain loop 4',
+         'U2': 'steering 6 loops raises GSM8k accuracy', 'KP1': 'Koopman direction aligns with u (|cos| >= 0.5)',
+         'KP2': 'label-free Koopman direction steers', 'A1': 'mode-seeking attractor (step shrinks, confident + wrong)',
+         'A2': 'u beats entropy drop as a damage signal', 'OH2': 'direction-score stopping beats fixed 4',
+         'G1o': 'u transfers to other text'}
+    det = {'N1': lambda: f"beats {o2['nulls']['u_better_than_random_frac']:.0%} random, {o2['nulls']['u_better_than_shuffled_frac']:.0%} shuffled",
+           'N2': lambda: f"u - mean {o2['N2_detail'][0]:+.4f}", 'N3': lambda: f"u - raw {o2['N3_detail'][0]:+.4f}",
+           'U1': lambda: '; '.join(f"{k}: {v['steered'][0]:.4f} vs d4 {v['unsteered_depth4'][0]:.4f}" for k, v in o2['U1_detail'].items()),
+           'U2': lambda: str({k: (round(v, 3) if isinstance(v, float) else round(v[0], 3)) for k, v in o2['U2_detail'].items()}),
+           'KP1': lambda: f"cos kmode {o2['cos_with_u']['kmode']:+.2f}, katt {o2['cos_with_u']['katt']:+.2f}, rho {o2['koopman']['rho']:.3f}",
+           'KP2': lambda: f"kmode {o2['steer_vs_none']['kmode'][0]:+.4f}, katt {o2['steer_vs_none']['katt'][0]:+.4f} vs none",
+           'A1': lambda: f"step Spearman {o2['step_spearman_beyond4']:+.2f}, entropy d4/d8 {o2['dynamics']['4']['entropy']:.3f}/{o2['dynamics']['8']['entropy']:.3f}" if '4' in o2['dynamics'] else '',
+           'A2': lambda: f"dir {o2['A2_detail']['corr_dir']:+.3f} vs entropy {o2['A2_detail']['corr_entropy_drop']:+.3f}",
+           'OH2': lambda: f"{o2['OH2_detail']['nll_stop'][0]:.4f} vs {o2['OH2_detail']['nll_fixed4'][0]:.4f}",
+           'G1o': lambda: f"vs none {o2['G1o_detail']['u_vs_none'][0]:+.4f}, vs random {o2['G1o_detail']['u_vs_random'][0]:+.4f}"}
+    for k in q:
+        if k in o2:
+            try:
+                d_ = det[k]()
+            except Exception:
+                d_ = ''
+            row(k, f'{q[k]} ({lab})', o2[k], d_)
 open('CHECKS.md', 'w').write('\n'.join(L) + '\n'); print('\n'.join(L))
