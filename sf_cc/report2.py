@@ -27,6 +27,8 @@ run there; band-limited re-encoding after FreqForcing), fixed BEFORE the run (re
   S4  sink3_reenc2_cache vs sink3 at 4 min: aesthetic CI > 0, with NC  (the drift rule predicts PASS)
   B1  band-limited beats plain re-encode on the same model: causvid_sink3_reenc2_cache_blo vs causvid_sink3_reenc2_cache
       OR sink3_reenc2_cache_blo vs sink3_reenc2_cache, aesthetic paired CI > 0, and the blo arm passes NC vs its sink
+Added Nov 25 (afternoon), before the run: V3  4 min, causvid_sink3_reenc2_cache vs causvid_sink3 on FRESH prompts
+24-39: aesthetic CI > 0, with NC (second replication of V1/V2)
 Also reported, no pass/fail: partial projection (a50), drift trigger (evt2), statistics anchoring (stat), colour drift,
 generation time, number of corrections, drift signal."""
 import glob, json, os, sys, numpy as np
@@ -145,6 +147,10 @@ if 'long' in root:
     ref_drift = [m['shift'][-1][1] for _, m in D.get('causvid_sink3', {}).values() if m['shift']]
     if ref_drift:
         L.append(f'\nNo-correction CausVid drift at the end of 4 min: {np.mean(ref_drift):.4f}')
+    fresh('Second confirmation on fresh prompts 24-39 (4 min)', cv, 'causvid_sink3', 24)
+    a3 = 'causvid_sink3_reenc2_cache'
+    if a3 in D and paired(a3, 'causvid_sink3', 'aesthetic', 24)[3]:
+        ok['V3'] = paired(a3, 'causvid_sink3', 'aesthetic', 24)[1] > 0 and nc(a3, 'causvid_sink3', 24)
     if 'sink3_reenc2_cache' in D and 'sink3' in D:
         ok['S4'] = paired('sink3_reenc2_cache', 'sink3', 'aesthetic')[1] > 0 and nc('sink3_reenc2_cache', 'sink3')
     L += ['', '## Band-limited vs plain re-encode (same model, paired)', '', '| arm | vs | n | aesthetic | CLIP | DINO-to-first | motion | colour drift |', '|---|---|---|---|---|---|---|---|']

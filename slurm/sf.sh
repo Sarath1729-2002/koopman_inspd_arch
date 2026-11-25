@@ -60,4 +60,5 @@ done
 wait
 grep -h "Error\|Traceback" logs/sf/metrics_*.log | head
 python -m sf_cc.report $OUT; python -m sf_cc.report2 $OUT
+[[ $OUT == *long* ]] && { python -m sf_cc.mech $OUT > logs/sf/mech_${SLURM_JOB_ID}.log 2>&1 && grep -A2 "Pre-registered" $OUT/MECH.md || { echo "[mech] FAILED"; tail -8 logs/sf/mech_${SLURM_JOB_ID}.log; }; }
 echo "===== DONE -> $OUT/SF_REPORT.md  $OUT/fig_sf.png  videos in $OUT/<arm>/"

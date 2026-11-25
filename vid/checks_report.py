@@ -12,14 +12,15 @@ def row(k, q, ok, txt):
     L.append(f"| {k} | {q} | {'—' if ok is None else ('PASS' if ok else 'FAIL')} | {txt} |")
 
 
-for root, keys in (('results_sf_long/SF_CAMPAIGN.md', ('V1', 'V2')), ('results_sf/SF_CAMPAIGN.md', ('E1',))):
+for root, keys in (('results_sf_long/SF_CAMPAIGN.md', ('V1', 'V2', 'V3')), ('results_sf/SF_CAMPAIGN.md', ('E1',))):
     if os.path.exists(root):
         t = open(root).read()
         for k in keys:
             m = re.search(rf'- {k}: (PASS|FAIL)', t)
             if m:
                 q = {'V1': 'CausVid 4 min: re-encode helps (prompts 0-7)', 'V2': 'CausVid 4 min: re-encode helps on FRESH prompts 8-23',
-                     'E1': 'CausVid 60 s: drift-triggered re-encode helps on FRESH prompts 16-31'}[k]
+                     'E1': 'CausVid 60 s: drift-triggered re-encode helps on FRESH prompts 16-31',
+                     'V3': 'CausVid 4 min: re-encode helps on FRESH prompts 24-39'}[k]
                 row(k, q, m.group(1) == 'PASS', f'see {root}')
 g = j('results_growth.json')
 if g:
@@ -43,6 +44,9 @@ for root, keys in (('results_sf_long/SF_CAMPAIGN.md', ('S4', 'B1')),):
             if m_:
                 row(k, {'S4': 'Self-Forcing 4 min: re-encode helps (drift 4.7x)', 'B1': 'band-limited beats plain re-encode'}[k],
                     m_.group(1) == 'PASS', f'see {root}')
+mj = j('results_sf_long/mech.json')
+if mj and 'M1' in mj:
+    row('M1', 'CausVid: some image statistic drifts and re-encoding holds it back', mj['M1'], ', '.join(mj['M1_stats']) or 'none')
 for arm in ('base', 'sink4'):
     k = j(f'results_koop/koopman_{arm}.json')
     if k:
