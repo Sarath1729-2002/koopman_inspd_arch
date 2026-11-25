@@ -38,6 +38,9 @@ rng = np.random.default_rng(0)
 D = {}
 for d in sorted(os.listdir(root)):
     for fj in glob.glob(f'{root}/{d}/*.metrics.json'):
+        fm = fj.replace('.metrics.json', '.json')
+        if not os.path.exists(fm):   # video from an interrupted run (no meta): skip it
+            print('skip (no meta):', fj); continue
         m = json.load(open(fj)); meta = json.load(open(fj.replace('.metrics.json', '.json')))
         D.setdefault(d, {})[int(os.path.basename(fj)[:4])] = (m, meta)
 

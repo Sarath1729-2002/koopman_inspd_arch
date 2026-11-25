@@ -22,6 +22,9 @@ D = {}
 for arm in arms:
     for fj in glob.glob(f'{root}/{arm}/*.metrics.json'):
         idx = int(os.path.basename(fj)[:4])
+        fm = fj.replace('.metrics.json', '.json')
+        if not os.path.exists(fm):   # video from an interrupted run (no meta): skip it
+            print('skip (no meta):', fj); continue
         m = json.load(open(fj)); meta = json.load(open(fj.replace('.metrics.json', '.json')))
         D.setdefault(arm, {})[idx] = (m, meta)
 if 'base' not in D:
