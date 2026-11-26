@@ -24,7 +24,8 @@ def arm_cfg(arm):
                    the high-frequency structure from E(D(z))
               _mp  mean-preserving re-encode: keep each channel's spatial mean of z
               _s1  sampling seed 1 (noise-floor estimate)"""
-    c = dict(stab=15, P=0, evt=0.0, alpha=1.0, mm=False, keep=None, seed=0, noise=False, sink=0, ctx=False, post=False)
+    c = dict(stab=15, P=0, evt=0.0, alpha=1.0, mm=False, keep=None, seed=0, noise=False, sink=0, ctx=False, post=False,
+             sk=False, rnd=False)
     parts = arm.split('_')
     for q in parts:
         if q.startswith('stab'): c['stab'] = int(q[4:])
@@ -33,6 +34,8 @@ def arm_cfg(arm):
         elif q == 'post': c['post'] = True   # control: no feedback; re-encode every output frame once AFTER the rollout   # attention sink: first K frames (frame 0 = real prompt) stay in context
         elif q.startswith('reenc'): c['P'] = int(q[5:])
         elif q.startswith('evt'): c['evt'] = float(q[3:])
+        elif q == 'sk': c['sk'] = True     # re-encode a frame when its sparse-Koopman support novelty > tau (vid/skae_oasis.py)
+        elif q == 'rnd': c['rnd'] = True   # control: re-encode a random frame at the same rate as the sk trigger
         elif q.startswith('part'): c['P'], c['alpha'] = 1, float('0.' + q[4:])
         elif q == 'mm': c['mm'] = True
         elif q in ('lf', 'mp'): c['keep'] = q
@@ -207,7 +210,19 @@ class Oasis:
             zr_raw = s.reencode(z)
             zr = keep_lowfreq(z, zr_raw, cfg.get('keep'))
             shift[:, i] = (zr_raw - z).pow(2).flatten(1).sum(1) / z.pow(2).flatten(1).sum(1)
-            if cfg['evt'] > 0:
+            if cfg.get('sk') or cfg.get('rnd'):
+                if SKAE_[0] is None:
+                    from koop.skae import load_skae
+                    SKAE_[0] = load_skae(os.environ.get('VID_SKAE', 'results_final/skae_oasis.pt'), s.dev)
+                net_, sp_, ck_ = SKAE_[0]
+                if cfg.get('sk'):
+                    from koop.skae import supports as _sup, novelty as _nov
+                    m = _nov(_sup(net_, sp_(z.flatten(1))), ck_['bank'].to(s.dev), ck_['k']).to(s.dev) > ck_['tau']
+                else:
+                    m = torch.rand(B, device=s.dev) < ck_['rate']
+                if m.any():
+                    x[m, -1] = zr[m]; n_re += m.float()
+            elif cfg['evt'] > 0:
                 m = shift[:, i] > cfg['evt'] * floor
                 if m.any():
                     x[m, -1] = zr[m]; n_re += m.float()
@@ -264,6 +279,7 @@ def write_mp4(path, frames_u8, fps=20):
 
 
 ACT_ROOT = [None]
+SKAE_ = [None]   # (net, space, ckpt) loaded on first use by the sk / rnd arms
 
 
 def oasis_one_hot(raw):

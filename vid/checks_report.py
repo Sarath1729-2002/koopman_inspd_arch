@@ -106,4 +106,29 @@ for tag in ('', '_26'):
             except Exception:
                 d_ = ''
             row(k, f'{q[k]} ({lab})', o2[k], d_)
+sk = j('results_final/skae_oasis.json')
+if sk and 'SK1' in sk and 'base' in sk['SK1']:
+    b_ = sk['SK1']['base']
+    row('SK1', 'sparse-Koopman support novelty tracks Oasis drift (rerun of K1)', sk['SK1_pass'],
+        f"Spearman {b_['spearman_novelty_vs_drift']:+.2f}, late/early {b_['late_over_early']:.2f}; trigger rate {sk['rate']:.1%}")
+if os.path.exists('results_final/SKAE.md'):
+    t = open('results_final/SKAE.md').read()
+    for k, q in (('SKV1', 'sparse-Koopman trigger helps Oasis (vs sink)'), ('SKV2', 'it beats the VAE-drift trigger, same budget'),
+                 ('SKV3', 'it beats random frames, same rate')):
+        m_ = re.search(rf'- {k}: (PASS|FAIL)', t)
+        if m_:
+            row(k, q, m_.group(1) == 'PASS', 'see results_final/SKAE.md')
+for tag in ('', '_26'):
+    o3 = j(f'results_rdiag/oskae{tag}.json')
+    if not o3:
+        continue
+    lab = 'Ouro-2.6B' if tag else 'Ouro-1.4B'
+    row('SO1', f'support novelty beats drift size as a damage signal ({lab})', o3['SO1'],
+        f"{o3['SO1_detail']['corr_novelty']:+.3f} vs {o3['SO1_detail']['corr_drift_size']:+.3f}")
+    row('SO2', f'regime-specific directions beat one global direction ({lab})', o3['SO2'],
+        f"regime - global {o3['SO2_detail']['regime_vs_global'][0]:+.4f}")
+    if 'SO3' in o3:
+        d3 = o3['SO3_detail']
+        row('SO3', f'regime directions help wikitext (rerun of G1o) ({lab})', o3['SO3'],
+            f"wiki regime vs none {d3['wiki_regime_vs_none'][0]:+.4f}, vs global {d3['wiki_regime_vs_global'][0]:+.4f}; domain purity {o3['domain_purity']}")
 open('CHECKS.md', 'w').write('\n'.join(L) + '\n'); print('\n'.join(L))
