@@ -20,6 +20,16 @@ Arms (name tokens joined by '_'):
   blo / bhi     band-limited re-encode (Nov 25, after FreqForcing's low/high-frequency split): blo takes only the
                 LOW spatial frequencies of E(D(z)) (colour, layout) and keeps the model's own high frequencies (detail,
                 motion); bhi the reverse. Low = 5x5 box blur over each latent frame
+  ANCHOR arms (Nov 26, for content drift, which the VAE round trip cannot see). A second KV cache, the anchor cache,
+  holds the opening chunk at the sink AND copies of the opening chunk at every recent position, so attending to it
+  means "the recent past looked like the opening". One extra context write per chunk.
+  hgNN          anchor guidance: at every denoising step z <- z_full + NN/100 * (z_anchor - z_full), where z_anchor is the
+                same denoiser call made with the anchor cache (2x denoiser calls per chunk)
+  adpN          anchor re-denoise ("content re-encoding"): every 4 chunks, re-noise the finished chunk to the N-th
+                smallest non-zero timestep and denoise it once WITH THE ANCHOR CACHE, so deviations from the opening
+                are treated as error (dproj does the same with the model's own context and changed nothing)
+  adtK          drift-triggered anchor re-denoise: only when the chunk's latent statistics (per-channel mean/std) are
+                more than K x the early variation (chunks 1-2) away from the opening chunk's
   ode           use checkpoints/ode_init.pt: the SAME causal 4-step student BEFORE Self-Forcing's self-rollout (DMD)
                 training, i.e. a model never trained on its own outputs (tests: does correction substitute for that?)
 Per video we save the mp4 (16 fps) and a json with per-chunk drift signal ||E(D(z)) - z||^2 / ||z||^2 and timings.
@@ -30,7 +40,7 @@ SF = os.path.abspath(os.environ.get('SF_DIR', 'ext/Self-Forcing'))
 
 
 def arm_cfg(arm):
-    c = dict(P=0, noise=False, sink=0, ckpt='dmd', cache=False, alpha=1.0, evt=0.0, dproj=0, stat=False, dpn=False, band=None)
+    c = dict(P=0, noise=False, sink=0, ckpt='dmd', cache=False, alpha=1.0, evt=0.0, dproj=0, stat=False, dpn=False, band=None, hg=0.0, adp=0, adt=0.0)
     for q in arm.split('_'):
         if q.startswith('reenc'): c['P'] = int(q[5:])
         elif q.startswith('noise'): c['P'], c['noise'] = int(q[5:]), True
@@ -43,6 +53,9 @@ def arm_cfg(arm):
         elif q.startswith('dproj'): c['dproj'] = int(q[5:] or 1)
         elif q == 'stat': c['stat'] = True
         elif q in ('blo', 'bhi'): c['band'] = q[1:]
+        elif q.startswith('hg'): c['hg'] = int(q[2:]) / 100
+        elif q.startswith('adp'): c['adp'] = int(q[3:] or 2)
+        elif q.startswith('adt'): c['adt'], c['adp'] = float(q[3:]), c['adp'] or 2
         elif q == 'dpn': c['dpn'] = True   # control for dproj: random nudge of the same size as the projection's change
         elif q[0] == 'a' and q[1:].isdigit(): c['alpha'] = int(q[1:]) / 100   # correction goes ONLY into the KV-cache context; the output keeps the original latents
     return c
@@ -201,6 +214,18 @@ def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4):
         for b in range(len(pipe.kv_cache1)):
             pipe.kv_cache1[b]['global_end_index'] = torch.tensor([0], dtype=torch.long, device=dev)
             pipe.kv_cache1[b]['local_end_index'] = torch.tensor([0], dtype=torch.long, device=dev)
+    anchor = c['hg'] > 0 or c['adp'] > 0
+    if anchor:
+        if getattr(pipe, '_kv_anchor', None) is None:   # a second cache with the same layout as the main one
+            main = pipe.kv_cache1
+            pipe._initialize_kv_cache(batch_size=B, dtype=noise.dtype, device=dev)
+            pipe._kv_anchor, pipe.kv_cache1 = pipe.kv_cache1, main
+        for b in range(len(pipe._kv_anchor)):
+            pipe._kv_anchor[b]['global_end_index'] = torch.tensor([0], dtype=torch.long, device=dev)
+            pipe._kv_anchor[b]['local_end_index'] = torch.tensor([0], dtype=torch.long, device=dev)
+    kva = getattr(pipe, '_kv_anchor', None)
+    z0, st0, st_early = None, None, []
+    stats = lambda zz: torch.cat([zz.float().mean(dim=(1, 3, 4)), zz.float().std(dim=(1, 3, 4))], -1)
     out = torch.zeros_like(noise)
     shifts, diag_time, floor, ref, n_act = [], 0.0, [], [], 0
     sv = StreamVAE(pipe.vae)   # one causal decode/encode stream per video, fed every chunk in order
@@ -212,6 +237,10 @@ def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4):
             t = torch.ones([B, F_], device=dev, dtype=torch.int64) * ts
             _, z = pipe.generator(noisy_image_or_video=x, conditional_dict=cond, timestep=t, kv_cache=pipe.kv_cache1,
                                   crossattn_cache=pipe.crossattn_cache, current_start=cur * pipe.frame_seq_length)
+            if c['hg'] > 0 and blk > 0:   # anchor guidance
+                _, za = pipe.generator(noisy_image_or_video=x, conditional_dict=cond, timestep=t, kv_cache=kva,
+                                       crossattn_cache=pipe.crossattn_cache, current_start=cur * pipe.frame_seq_length)
+                z = (z.float() + c['hg'] * (za.float() - z.float())).to(z.dtype)
             if i < len(pipe.denoising_step_list) - 1:
                 nt = pipe.denoising_step_list[i + 1]
                 x = pipe.scheduler.add_noise(z.flatten(0, 1), torch.randn_like(z.flatten(0, 1)),
@@ -264,11 +293,34 @@ def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4):
                 zp = (z.float() + e / e.flatten(1).norm(dim=1).view(-1, 1, 1, 1, 1) * d.view(-1, 1, 1, 1, 1)).to(z.dtype)
             z = zp
             n_act += 1
+        if anchor and blk == 0:
+            z0, st0 = z.clone(), stats(z)
+        if c['adp'] and blk > 0:   # anchor re-denoise: periodic (every 4 chunks) or drift-triggered (adt)
+            if c['adt'] > 0:
+                dd = float((stats(z) - st0).norm())
+                if blk <= 2:
+                    st_early.append(dd)
+                go = blk > 2 and dd > c['adt'] * max(np.mean(st_early), 1e-6)
+            else:
+                go = blk % 4 == 0
+            if go:
+                nz = [int(v) for v in pipe.denoising_step_list if int(v) > 0]
+                tp = nz[-c['adp']]
+                zn = pipe.scheduler.add_noise(z.flatten(0, 1), torch.randn_like(z.flatten(0, 1)),
+                                              tp * torch.ones([B * F_], device=dev, dtype=torch.long)).unflatten(0, z.shape[:2])
+                _, z = pipe.generator(noisy_image_or_video=zn, conditional_dict=cond,
+                                      timestep=torch.ones([B, F_], device=dev, dtype=torch.int64) * tp, kv_cache=kva,
+                                      crossattn_cache=pipe.crossattn_cache, current_start=cur * pipe.frame_seq_length)
+                n_act += 1
         out[:, cur:cur + F_] = z_out if c.get('cache') else z
         pipe.generator(noisy_image_or_video=z, conditional_dict=cond,
                        timestep=torch.ones([B, F_], device=dev, dtype=torch.int64) * cfg.context_noise,
                        kv_cache=pipe.kv_cache1, crossattn_cache=pipe.crossattn_cache,
                        current_start=cur * pipe.frame_seq_length)
+        if anchor:   # the anchor cache sees the opening chunk at every position
+            pipe.generator(noisy_image_or_video=z0, conditional_dict=cond,
+                           timestep=torch.ones([B, F_], device=dev, dtype=torch.int64) * cfg.context_noise,
+                           kv_cache=kva, crossattn_cache=pipe.crossattn_cache, current_start=cur * pipe.frame_seq_length)
         cur += F_
     torch.cuda.synchronize(); gen_time = time.time() - t0 - diag_time
     video = stream_decode(pipe.vae, out)

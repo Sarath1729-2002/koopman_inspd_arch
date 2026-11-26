@@ -8,6 +8,11 @@ comparable with each other, not with published tables.
                        (100 = no colour drift)
   motion drift score   100 x min/max of mean flow over the first vs last 5 s (100 = motion kept)
 Each correction arm is compared with its no-correction arm, paired over prompts: mean difference [95% CI].
+Anchor arms (Nov 26; results_sf_anchor, 120 s, prompts 0-15; criteria fixed before the run):
+  NC  an arm counts only if it keeps motion (dynamic >= 0.8 x the reference) and is not significantly less aesthetic
+  AN1 some Self-Forcing anchor arm (hg25 / hg50 / adp2 / adt2) raises the colour drift score: paired CI > 0, with NC
+  AN2 the AN1 arm with the largest colour gain also raises subject consistency: CI > 0
+  AN3 the same kind of arm on CausVid (hg50 or adp2) raises the colour drift score: CI > 0, with NC
 Writes results_split/BENCH.md + bench.json"""
 import glob, json, os, numpy as np
 
@@ -15,7 +20,9 @@ rng = np.random.default_rng(0)
 GROUPS = [('CausVid 4 min', 'results_sf_long', 'causvid_sink3', ['causvid_sink3_reenc2_cache']),
           ('Self-Forcing 4 min', 'results_sf_long', 'sink3', ['sink3_reenc2_cache']),
           ('CausVid 60 s', 'results_sf', 'causvid_sink3', ['causvid_sink3_reenc2_cache', 'causvid_sink3_evt2']),
-          ('Self-Forcing 60 s', 'results_sf', 'sink3', ['sink3_reenc2_cache', 'sink3_dproj2_cache'])]
+          ('Self-Forcing 60 s', 'results_sf', 'sink3', ['sink3_reenc2_cache', 'sink3_dproj2_cache']),
+          ('Self-Forcing 120 s, anchors', 'results_sf_anchor', 'sink3', ['sink3_hg25', 'sink3_hg50', 'sink3_adp2', 'sink3_adt2', 'sink3_reenc2_cache']),
+          ('CausVid 120 s, anchors', 'results_sf_anchor', 'causvid_sink3', ['causvid_sink3_hg50', 'causvid_sink3_adp2'])]
 KEYS = ['subject', 'aes', 'aes_last', 'dynamic', 'colour', 'motion']
 
 
@@ -92,5 +99,22 @@ if __name__ == '__main__':
             res[name][a] = d
             L.append(f'| {a} − ref | {len(ids)} | ' + ' | '.join(f'{d[k][0]:+.3f} [{d[k][1]:+.3f}, {d[k][2]:+.3f}]' for k in KEYS) + ' |')
         L.append('')
+    def nca(g, a):
+        d = res[g][a]; ref = list(res[g].values())[0]
+        return ref['dynamic'] + d['dynamic'][0] >= 0.8 * ref['dynamic'] and d['aes'][2] >= 0
+    gs, gc = 'Self-Forcing 120 s, anchors', 'CausVid 120 s, anchors'
+    if gs in res:
+        cand = [a for a in ('sink3_hg25', 'sink3_hg50', 'sink3_adp2', 'sink3_adt2') if a in res[gs]]
+        win = [a for a in cand if res[gs][a]['colour'][1] > 0 and nca(gs, a)]
+        crit = {'AN1': bool(win)}
+        if win:
+            best = max(win, key=lambda a: res[gs][a]['colour'][0])
+            crit['AN2'] = bool(res[gs][best]['subject'][1] > 0); crit['AN1_arm'] = best
+            kind = 'hg50' if best.startswith('sink3_hg') else 'adp2'
+            ca = f'causvid_sink3_{kind}'
+            if gc in res and ca in res[gc]:
+                crit['AN3'] = bool(res[gc][ca]['colour'][1] > 0 and nca(gc, ca))
+        res['criteria'] = crit
+        L += ['## Pre-registered (anchor arms)', ''] + [f'- {k}: {v if isinstance(v, str) else ("PASS" if v else "FAIL")}' for k, v in crit.items()]
     json.dump(res, open('results_split/bench.json', 'w'), indent=1)
     open('results_split/BENCH.md', 'w').write('\n'.join(L) + '\n'); print('\n'.join(L))
