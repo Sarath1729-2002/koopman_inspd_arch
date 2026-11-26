@@ -217,7 +217,7 @@ class Oasis:
                 net_, sp_, ck_ = SKAE_[0]
                 if cfg.get('sk'):
                     from koop.skae import supports as _sup, novelty as _nov
-                    m = _nov(_sup(net_, sp_(z.flatten(1))), ck_['bank'].to(s.dev), ck_['k']).to(s.dev) > ck_['tau']
+                    m = _nov(_sup(net_, sp_(z.flatten(1))), ck_['bank'], ck_['k']).to(s.dev) > ck_['tau']   # supports + bank on CPU
                 else:
                     m = torch.rand(B, device=s.dev) < ck_['rate']
                 if m.any():
