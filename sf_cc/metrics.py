@@ -50,11 +50,14 @@ IN_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
 
 @torch.no_grad()
-def video_metrics(M, frames, prompt, dev, fps=16, every=8):
+def video_metrics(M, frames, prompt, dev, fps=16, every=8, prompt2=None):
     idx = np.arange(0, len(frames), every)
     x = torch.from_numpy(frames[idx]).permute(0, 3, 1, 2).float().div(255)           # [N,3,H,W]
     out = {k: [] for k in ('aesthetic', 'clip', 'dino_first', 'dino_adj', 'flow', 'bright', 'sat', 'sharp')}
     txt = M['clip'].encode_text(M['tok']([prompt[:300]]).to(dev)); txt = txt / txt.norm(dim=-1, keepdim=True)
+    if prompt2:   # prompt-switch videos: alignment with the second prompt too
+        out['clip2'] = []
+        txt2 = M['clip'].encode_text(M['tok']([prompt2[:300]]).to(dev)); txt2 = txt2 / txt2.norm(dim=-1, keepdim=True)
     feats_d = []
     for b in range(0, len(x), 32):
         xb = x[b:b + 32].to(dev)
@@ -63,6 +66,8 @@ def video_metrics(M, frames, prompt, dev, fps=16, every=8):
         e = e / e.norm(dim=-1, keepdim=True)
         out['aesthetic'] += M['aes'](e.float()).squeeze(-1).tolist()
         out['clip'] += (100 * (e @ txt.T)).squeeze(-1).tolist()
+        if prompt2:
+            out['clip2'] += (100 * (e @ txt2.T)).squeeze(-1).tolist()
         xd = F.interpolate(xb, size=(224, 392), mode='bilinear', align_corners=False)
         feats_d.append(F.normalize(M['dino']((xd - IN_MEAN.to(dev)) / IN_STD.to(dev)), dim=-1))
         g = xb.mean(1, keepdim=True)
@@ -102,7 +107,7 @@ if __name__ == '__main__':
             if not os.path.exists(mp4[:-4] + '.json'):   # video from an interrupted run (no meta): skip it
                 print('skip (no meta):', mp4, flush=True); continue
             meta = json.load(open(mp4[:-4] + '.json'))
-            m = video_metrics(M, read_frames(mp4), meta['prompt'], dev)
+            m = video_metrics(M, read_frames(mp4), meta['prompt'], dev, prompt2=meta.get('prompt2'))
             json.dump(m, open(fj + '.tmp', 'w')); os.replace(fj + '.tmp', fj)
             print(f'[metrics] {arm} {os.path.basename(mp4)}  aesthetic first/last {np.mean(m["aesthetic"][:20]):.2f}/'
                   f'{np.mean(m["aesthetic"][-20:]):.2f}  flow {np.mean(m["flow"]):.2f}', flush=True)

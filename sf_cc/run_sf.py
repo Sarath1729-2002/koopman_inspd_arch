@@ -30,6 +30,8 @@ Arms (name tokens joined by '_'):
                 are treated as error (dproj does the same with the model's own context and changed nothing)
   adtK          drift-triggered anchor re-denoise: only when the chunk's latent statistics (per-channel mean/std) are
                 more than K x the early variation (chunks 1-2) away from the opening chunk's
+  sw            prompt switch (interactive streaming test): halfway through, the prompt changes to prompt idx+100
+  rf            with an anchor arm and sw: the anchor is refreshed to the first chunk generated after the switch
   ode           use checkpoints/ode_init.pt: the SAME causal 4-step student BEFORE Self-Forcing's self-rollout (DMD)
                 training, i.e. a model never trained on its own outputs (tests: does correction substitute for that?)
 Per video we save the mp4 (16 fps) and a json with per-chunk drift signal ||E(D(z)) - z||^2 / ||z||^2 and timings.
@@ -40,7 +42,7 @@ SF = os.path.abspath(os.environ.get('SF_DIR', 'ext/Self-Forcing'))
 
 
 def arm_cfg(arm):
-    c = dict(P=0, noise=False, sink=0, ckpt='dmd', cache=False, alpha=1.0, evt=0.0, dproj=0, stat=False, dpn=False, band=None, hg=0.0, adp=0, adt=0.0)
+    c = dict(P=0, noise=False, sink=0, ckpt='dmd', cache=False, alpha=1.0, evt=0.0, dproj=0, stat=False, dpn=False, band=None, hg=0.0, adp=0, adt=0.0, sw=False, rf=False)
     for q in arm.split('_'):
         if q.startswith('reenc'): c['P'] = int(q[5:])
         elif q.startswith('noise'): c['P'], c['noise'] = int(q[5:]), True
@@ -53,6 +55,8 @@ def arm_cfg(arm):
         elif q.startswith('dproj'): c['dproj'] = int(q[5:] or 1)
         elif q == 'stat': c['stat'] = True
         elif q in ('blo', 'bhi'): c['band'] = q[1:]
+        elif q == 'sw': c['sw'] = True
+        elif q == 'rf': c['rf'] = True
         elif q.startswith('hg'): c['hg'] = int(q[2:]) / 100
         elif q.startswith('adp'): c['adp'] = int(q[3:] or 2)
         elif q.startswith('adt'): c['adt'], c['adp'] = float(q[3:]), c['adp'] or 2
@@ -197,7 +201,7 @@ def build(sink, local=21, ckpt='dmd'):
 
 
 @torch.no_grad()
-def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4):
+def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4, prompt2=None):
     """Re-implementation of CausalInferencePipeline.inference (T2V, no initial latent) with the correction hook."""
     dev = 'cuda'
     g = torch.Generator(device=dev).manual_seed(seed)
@@ -205,6 +209,8 @@ def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4):
     torch.manual_seed(seed)
     B, F_ = 1, pipe.num_frame_per_block
     cond = pipe.text_encoder(text_prompts=[prompt])
+    cond2 = pipe.text_encoder(text_prompts=[prompt2]) if prompt2 else None
+    sw_blk = (n_lat // pipe.num_frame_per_block) // 2 if prompt2 else -1
     if pipe.kv_cache1 is None:
         pipe._initialize_kv_cache(batch_size=B, dtype=noise.dtype, device=dev)
         pipe._initialize_crossattn_cache(batch_size=B, dtype=noise.dtype, device=dev)
@@ -232,6 +238,10 @@ def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4):
     torch.cuda.synchronize(); t0 = time.time()
     cur = 0
     for blk in range(n_lat // F_):
+        if blk == sw_blk:   # prompt switch: new text conditioning, cross-attention cache rebuilt on the next call
+            cond = cond2
+            for b in range(pipe.num_transformer_blocks):
+                pipe.crossattn_cache[b]['is_init'] = False
         x = noise[:, cur:cur + F_]
         for i, ts in enumerate(pipe.denoising_step_list):
             t = torch.ones([B, F_], device=dev, dtype=torch.int64) * ts
@@ -293,7 +303,7 @@ def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4):
                 zp = (z.float() + e / e.flatten(1).norm(dim=1).view(-1, 1, 1, 1, 1) * d.view(-1, 1, 1, 1, 1)).to(z.dtype)
             z = zp
             n_act += 1
-        if anchor and blk == 0:
+        if anchor and (blk == 0 or (c.get('rf') and blk == sw_blk)):
             z0, st0 = z.clone(), stats(z)
         if c['adp'] and blk > 0:   # anchor re-denoise: periodic (every 4 chunks) or drift-triggered (adt)
             if c['adt'] > 0:
@@ -345,10 +355,12 @@ if __name__ == '__main__':
         f = os.path.join(out, f'{idx:04d}.json')
         if os.path.exists(f) and not a.smoke:
             continue
-        video, shifts, gt, n_act = generate(pipe, cfg, ext[idx], n_lat, c, seed=1000 + idx)
+        j2 = (idx + 100) % len(ext)
+        video, shifts, gt, n_act = generate(pipe, cfg, ext[idx], n_lat, c, seed=1000 + idx, prompt2=ext[j2] if c['sw'] else None)
         write_mp4(os.path.join(out, f'{idx:04d}.mp4'), video)
         json.dump({'arm': a.arm, 'cfg': c, 'idx': idx, 'prompt': short[idx], 'latents': n_lat, 'frames': int(video.shape[0]),
-                   'shift': shifts, 'gen_seconds': gt, 'n_corrections': n_act}, open(f + '.tmp', 'w')); os.replace(f + '.tmp', f)
+                   'shift': shifts, 'gen_seconds': gt, 'n_corrections': n_act,
+                   **({'prompt2': short[j2], 'switch_frac': 0.5} if c['sw'] else {})}, open(f + '.tmp', 'w')); os.replace(f + '.tmp', f)
         sh = [s for _, s in shifts]
         print(f'[{a.arm}] prompt {idx}: {video.shape[0]} frames in {gt:.0f}s  drift signal first/last '
               f'{(sh[0] if sh else float("nan")):.4f}/{(sh[-1] if sh else float("nan")):.4f}', flush=True)
