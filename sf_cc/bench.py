@@ -38,17 +38,22 @@ def hue_hist(frames):
 
 
 def colour_score(mp4, fps=16, sec=5, every=8):
+    """decodes only the first and the last `sec` seconds (seeks to the end instead of decoding the whole video)"""
     import av
-    first, last, buf = [], [], []
+    first, last = [], []
     with av.open(mp4) as c:
+        st = c.streams.video[0]
         for t, fr in enumerate(c.decode(video=0)):
-            if t % every:
-                continue
-            a = fr.to_ndarray(format='rgb24')[::4, ::4]
-            if t < fps * sec:
-                first.append(a)
-            buf.append(a); buf = buf[-(fps * sec // every):]
-    last = buf
+            if t >= fps * sec:
+                break
+            if t % every == 0:
+                first.append(fr.to_ndarray(format='rgb24')[::4, ::4])
+        dur = float(st.duration * st.time_base) if st.duration else float(c.duration / 1e6)
+        c.seek(int(max(dur - sec - 1, 0) / st.time_base), stream=st, backward=True)
+        buf = []
+        for t, fr in enumerate(c.decode(video=0)):
+            buf.append(fr.to_ndarray(format='rgb24')[::4, ::4])
+        last = buf[-(fps * sec):][::every]
     return 100 * float(np.minimum(hue_hist(np.stack(first)), hue_hist(np.stack(last))).sum())
 
 
@@ -78,7 +83,7 @@ if __name__ == '__main__':
             if not os.path.exists(mj.replace('.metrics.json', '.json')) or not os.path.exists(mj.replace('.metrics.json', '.mp4')):
                 continue
             if mj not in C:
-                C[mj] = video_scores(mj); json.dump(C, open(cf, 'w'))
+                C[mj] = video_scores(mj); json.dump(C, open(cf, 'w')); print('[bench]', mj, flush=True)
             out[os.path.basename(mj)] = C[mj]
         return out
     L = ['# Long-video benchmarks (our implementation; arms comparable with each other, not with published tables)', '']
