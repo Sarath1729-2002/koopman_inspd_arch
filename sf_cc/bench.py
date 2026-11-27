@@ -24,6 +24,16 @@ Overnight confirmation (Nov 27; criteria fixed before the run):
       the last 30 s, adp2 minus sink only, CI lower > -1
   SW2 refreshing the anchor at the switch helps the new prompt: adp2+refresh minus adp2, CLIP to the second prompt, CI > 0
   Reported: adp strength (adp1 / adp3), triggered (adt2), adp2 + VAE re-encode stacked.
+Third confirmation (Nov 27, afternoon; cache-only = the anchor-corrected chunk goes into the model's memory, the viewer
+sees the uncorrected one; primary arm adp3_cache; criteria fixed before the run):
+  CC1 fresh prompts 32-47 (results_sf_anchor3, 120 s): Self-Forcing adp3_cache raises the colour drift score (CI > 0),
+      with NC, AND passes SEAM (CI lower > -0.01)
+  CC2 same on CausVid
+  CC3 Self-Forcing adp3_cache raises subject consistency, CI > 0
+  CC4 4 min (prompts 8-15): Self-Forcing adp3_cache raises the colour drift score, with NC and SEAM
+  CC5 prompt switch (prompts 8-15): adp3_cache + anchor refresh follows the new prompt no worse than sink only
+      (CLIP to the 2nd prompt, last 30 s, CI lower > -1)
+  CMP vs Deep Forcing (same prompts, our metric code): adp3_cache - deepforcing colour drift score, CI > 0
 Writes results_split/BENCH.md + bench.json"""
 import glob, json, os, numpy as np
 
@@ -37,7 +47,10 @@ GROUPS = [('CausVid 4 min', 'results_sf_long', 'causvid_sink3', ['causvid_sink3_
           ('Self-Forcing 120 s, fresh prompts', 'results_sf_anchor2', 'sink3', ['sink3_adp1', 'sink3_adp2', 'sink3_adp3', 'sink3_adt2', 'sink3_adp2_reenc2_cache']),
           ('CausVid 120 s, fresh prompts', 'results_sf_anchor2', 'causvid_sink3', ['causvid_sink3_adp2', 'causvid_sink3_adp2_reenc2_cache']),
           ('Self-Forcing 120 s, prompt switch', 'results_sf_switch', 'sink3_sw', ['sink3_adp2_sw', 'sink3_adp2_sw_rf'])]
-GROUPS[0][3].append('causvid_sink3_adp2'); GROUPS[1][3].append('sink3_adp2')
+GROUPS += [('Self-Forcing 120 s, third set', 'results_sf_anchor3', 'sink3', ['sink3_adp2_cache', 'sink3_adp3_cache', 'deepforcing']),
+           ('CausVid 120 s, third set', 'results_sf_anchor3', 'causvid_sink3', ['causvid_sink3_adp2_cache', 'causvid_sink3_adp3_cache'])]
+GROUPS[0][3].extend(['causvid_sink3_adp2', 'causvid_sink3_adp3_cache']); GROUPS[1][3].extend(['sink3_adp2', 'sink3_adp3_cache'])
+GROUPS[8][3].append('sink3_adp3_cache_sw_rf')
 KEYS = ['subject', 'aes', 'aes_last', 'dynamic', 'colour', 'motion', 'seam', 'clip_late', 'clip2_late']
 NAMES = ['subject consistency', 'aesthetic', 'aesthetic last 10 s', 'dynamic', 'colour drift score', 'motion drift score',
          'seam (adj. sim. at corrected - other chunk boundaries)', 'CLIP last 30 s', 'CLIP to 2nd prompt, last 30 s']
@@ -174,6 +187,25 @@ if __name__ == '__main__':
             A, B = PV[swg]['sink3_adp2_sw_rf'], PV[swg]['sink3_adp2_sw']; ids = sorted(set(A) & set(B))
             dd = boot([A[i]['clip2_late'] - B[i]['clip2_late'] for i in ids]); res['SW2_detail'] = dd
             c2['SW2'] = bool(dd[1] > 0)
+    c3, t3, t3c = {}, 'Self-Forcing 120 s, third set', 'CausVid 120 s, third set'
+    ok3 = lambda g, a: res[g][a]['colour'][1] > 0 and nca(g, a) and res[g][a]['seam'][1] > -0.01
+    if t3 in res and 'sink3_adp3_cache' in res[t3]:
+        c3['CC1'] = bool(ok3(t3, 'sink3_adp3_cache')); c3['CC3'] = bool(res[t3]['sink3_adp3_cache']['subject'][1] > 0)
+        if 'deepforcing' in PV.get(t3, {}):
+            A, B = PV[t3]['sink3_adp3_cache'], PV[t3]['deepforcing']; ids = sorted(set(A) & set(B))
+            res['CMP_detail'] = {k: boot([A[i][k] - B[i][k] for i in ids]) for k in KEYS}
+            c3['CMP'] = bool(res['CMP_detail']['colour'][1] > 0)
+            L += ['', '## adp3_cache minus Deep Forcing (paired by prompt)', '', '| ' + ' | '.join(NAMES[:8]) + ' |', '|' + '---|' * 8,
+                  '| ' + ' | '.join(f"{res['CMP_detail'][k][0]:+.3f} [{res['CMP_detail'][k][1]:+.3f}, {res['CMP_detail'][k][2]:+.3f}]" for k in KEYS[:8]) + ' |']
+    if t3c in res and 'causvid_sink3_adp3_cache' in res[t3c]:
+        c3['CC2'] = bool(ok3(t3c, 'causvid_sink3_adp3_cache'))
+    if lS in res and 'sink3_adp3_cache' in res[lS]:
+        c3['CC4'] = bool(ok3(lS, 'sink3_adp3_cache'))
+    if swg in res and 'sink3_adp3_cache_sw_rf' in res[swg]:
+        c3['CC5'] = bool(res[swg]['sink3_adp3_cache_sw_rf']['clip2_late'][1] > -1)
+    if c3:
+        res['criteria_third'] = c3
+        L += ['', '## Pre-registered (third confirmation)', ''] + [f'- {k}: {"PASS" if v else "FAIL"}' for k, v in c3.items()]
     if c2:
         res['criteria_overnight'] = c2
         L += ['', '## Pre-registered (overnight confirmation)', ''] + [f'- {k}: {"PASS" if v else "FAIL"}' for k, v in c2.items()]
