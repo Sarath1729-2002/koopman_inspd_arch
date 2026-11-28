@@ -1,5 +1,5 @@
 """Runs Deep Forcing's inference.py (cwd = ext/DeepForcing) with two compatibility shims for our cluster env, the
-same ones run_sf.py uses for Self-Forcing: (1) torchvision >= 0.24 has no torchvision.io.write_video -> an av/libx264
+same ones run_sf.py uses for Self-Forcing, plus (0) a stub for lmdb, which only the training datasets use: (1) torchvision >= 0.24 has no torchvision.io.write_video -> an av/libx264
 writer (crf 18, like run_sf.write_mp4); (2) flash-attn wheels do not match this torch -> PyTorch SDPA.
 Deep Forcing's own code is not modified. Usage: python /path/sf_cc/df_launch.py <inference.py args>"""
 import os, runpy, sys
@@ -22,6 +22,12 @@ def write_video(path, video, fps=16, **kw):
             c.mux(pk)
 
 
+import importlib, types
+for opt in ('lmdb',):   # only used by Deep Forcing's training datasets; inference never calls it
+    try:
+        importlib.import_module(opt)
+    except ImportError:
+        sys.modules[opt] = types.ModuleType(opt)
 if not hasattr(tio, 'write_video'):
     tio.write_video = write_video
 import pipeline  # noqa: F401  Deep Forcing's pipeline -> loads its wan modules
