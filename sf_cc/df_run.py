@@ -13,8 +13,9 @@ if __name__ == '__main__':
     a = ap.parse_args()
     root = os.getcwd(); DF = os.path.join(root, 'ext/DeepForcing'); out = os.path.join(root, a.out, 'deepforcing')
     os.makedirs(out, exist_ok=True)
-    ext = [l.strip() for l in open('prompts/MovieGenVideoBench_extended.txt', encoding='utf-8')]
-    short = [l.strip() for l in open('prompts/MovieGenVideoBench.txt', encoding='utf-8')]
+    SFP = os.path.join(root, os.environ.get('SF_DIR', 'ext/Self-Forcing'), 'prompts')   # same prompt files as run_sf.py
+    ext = [l.strip() for l in open(os.path.join(SFP, 'MovieGenVideoBench_extended.txt'), encoding='utf-8')]
+    short = [l.strip() for l in open(os.path.join(SFP, 'MovieGenVideoBench.txt'), encoding='utf-8')]
     lo, hi = (int(x) for x in a.prompts.split('-'))
     for idx in range(lo, hi + 1):
         f = os.path.join(out, f'{idx:04d}.json')

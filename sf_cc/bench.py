@@ -34,6 +34,11 @@ sees the uncorrected one; primary arm adp3_cache; criteria fixed before the run)
   CC5 prompt switch (prompts 8-15): adp3_cache + anchor refresh follows the new prompt no worse than sink only
       (CLIP to the 2nd prompt, last 30 s, CI lower > -1)
   CMP vs Deep Forcing (same prompts, our metric code): adp3_cache - deepforcing colour drift score, CI > 0
+Switch fix (Nov 27, evening; after CC5 failed: adp3_cache refreshed to the FIRST chunk after the switch, which still shows
+the old scene, so it locked the old prompt in). Delayed refresh rfN: corrections pause for N chunks, then the anchor is
+refreshed. Fixed before the run (prompts 8-15):
+  CC6 some delayed-refresh arm (adp3_cache_rf8 / adp3_cache_rf16 / adp2_cache_rf8) follows the new prompt no worse than
+      sink only (CLIP to the 2nd prompt, last 30 s, CI lower > -1) AND keeps end-of-video aesthetic gain (CI > 0)
 Writes results_split/BENCH.md + bench.json"""
 import glob, json, os, numpy as np
 
@@ -50,7 +55,7 @@ GROUPS = [('CausVid 4 min', 'results_sf_long', 'causvid_sink3', ['causvid_sink3_
 GROUPS += [('Self-Forcing 120 s, third set', 'results_sf_anchor3', 'sink3', ['sink3_adp2_cache', 'sink3_adp3_cache', 'deepforcing']),
            ('CausVid 120 s, third set', 'results_sf_anchor3', 'causvid_sink3', ['causvid_sink3_adp2_cache', 'causvid_sink3_adp3_cache'])]
 GROUPS[0][3].extend(['causvid_sink3_adp2', 'causvid_sink3_adp3_cache']); GROUPS[1][3].extend(['sink3_adp2', 'sink3_adp3_cache'])
-GROUPS[8][3].append('sink3_adp3_cache_sw_rf')
+GROUPS[8][3].extend(['sink3_adp3_cache_sw_rf', 'sink3_adp3_cache_sw_rf8', 'sink3_adp3_cache_sw_rf16', 'sink3_adp2_cache_sw_rf8'])
 KEYS = ['subject', 'aes', 'aes_last', 'dynamic', 'colour', 'motion', 'seam', 'clip_late', 'clip2_late']
 NAMES = ['subject consistency', 'aesthetic', 'aesthetic last 10 s', 'dynamic', 'colour drift score', 'motion drift score',
          'seam (adj. sim. at corrected - other chunk boundaries)', 'CLIP last 30 s', 'CLIP to 2nd prompt, last 30 s']
@@ -206,6 +211,12 @@ if __name__ == '__main__':
     if c3:
         res['criteria_third'] = c3
         L += ['', '## Pre-registered (third confirmation)', ''] + [f'- {k}: {"PASS" if v else "FAIL"}' for k, v in c3.items()]
+    if swg in res:
+        cand = [a for a in ('sink3_adp3_cache_sw_rf8', 'sink3_adp3_cache_sw_rf16', 'sink3_adp2_cache_sw_rf8') if a in res[swg]]
+        if cand:
+            ok6 = [a for a in cand if res[swg][a]['clip2_late'][1] > -1 and res[swg][a]['aes_last'][1] > 0]
+            res['criteria_switch'] = {'CC6': bool(ok6), 'CC6_arms': ok6}
+            L += ['', '## Pre-registered (switch fix)', '', f"- CC6: {'PASS' if ok6 else 'FAIL'} {ok6}"]
     if c2:
         res['criteria_overnight'] = c2
         L += ['', '## Pre-registered (overnight confirmation)', ''] + [f'- {k}: {"PASS" if v else "FAIL"}' for k, v in c2.items()]

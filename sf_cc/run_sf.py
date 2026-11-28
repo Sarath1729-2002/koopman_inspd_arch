@@ -31,7 +31,8 @@ Arms (name tokens joined by '_'):
   adtK          drift-triggered anchor re-denoise: only when the chunk's latent statistics (per-channel mean/std) are
                 more than K x the early variation (chunks 1-2) away from the opening chunk's
   sw            prompt switch (interactive streaming test): halfway through, the prompt changes to prompt idx+100
-  rf            with an anchor arm and sw: the anchor is refreshed to the first chunk generated after the switch
+  rf / rfN      with an anchor arm and sw: the anchor is refreshed N chunks after the switch (default 0 = the first chunk
+                after it), and anchor corrections pause until then so the new scene can form first
   ode           use checkpoints/ode_init.pt: the SAME causal 4-step student BEFORE Self-Forcing's self-rollout (DMD)
                 training, i.e. a model never trained on its own outputs (tests: does correction substitute for that?)
 Per video we save the mp4 (16 fps) and a json with per-chunk drift signal ||E(D(z)) - z||^2 / ||z||^2 and timings.
@@ -56,7 +57,7 @@ def arm_cfg(arm):
         elif q == 'stat': c['stat'] = True
         elif q in ('blo', 'bhi'): c['band'] = q[1:]
         elif q == 'sw': c['sw'] = True
-        elif q == 'rf': c['rf'] = True
+        elif q.startswith('rf') and (q == 'rf' or q[2:].isdigit()): c['rf'], c['rfd'] = True, int(q[2:] or 0)
         elif q.startswith('hg'): c['hg'] = int(q[2:]) / 100
         elif q.startswith('adp'): c['adp'] = int(q[3:] or 2)
         elif q.startswith('adt'): c['adt'], c['adp'] = float(q[3:]), c['adp'] or 2
@@ -303,7 +304,8 @@ def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4, prompt2=None)
                 zp = (z.float() + e / e.flatten(1).norm(dim=1).view(-1, 1, 1, 1, 1) * d.view(-1, 1, 1, 1, 1)).to(z.dtype)
             z = zp
             n_act += 1
-        if anchor and (blk == 0 or (c.get('rf') and blk == sw_blk)):
+        rblk = sw_blk + c.get('rfd', 0)
+        if anchor and (blk == 0 or (c.get('rf') and sw_blk >= 0 and blk == rblk)):
             z0, st0 = z.clone(), stats(z)
         if c['adp'] and blk > 0:   # anchor re-denoise: periodic (every 4 chunks) or drift-triggered (adt)
             if c['adt'] > 0:
@@ -313,6 +315,8 @@ def generate(pipe, cfg, prompt, n_lat, c, seed, W=3, diag_every=4, prompt2=None)
                 go = blk > 2 and dd > c['adt'] * max(np.mean(st_early), 1e-6)
             else:
                 go = blk % 4 == 0
+            if c.get('rf') and sw_blk >= 0 and sw_blk <= blk < rblk:   # let the new scene form before anchoring again
+                go = False
             if go:
                 nz = [int(v) for v in pipe.denoising_step_list if int(v) > 0]
                 tp = nz[-c['adp']]
