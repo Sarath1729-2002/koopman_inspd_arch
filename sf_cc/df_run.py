@@ -24,7 +24,7 @@ if __name__ == '__main__':
         tmp = os.path.join(out, f'_tmp_{idx}'); os.makedirs(tmp, exist_ok=True)
         pf = os.path.join(tmp, 'prompt.txt'); open(pf, 'w', encoding='utf-8').write(ext[idx] + '\n')
         n_lat = 21 if a.smoke else a.latents
-        cmd = [sys.executable, 'inference.py', '--config_path', a.config, '--output_folder', tmp,
+        cmd = [sys.executable, os.path.join(root, 'sf_cc', 'df_launch.py'), '--config_path', a.config, '--output_folder', tmp,
                '--checkpoint_path', 'checkpoints/self_forcing_dmd.pt', '--data_path', pf, '--use_ema',
                '--save_with_index', '--seed', str(1000 + idx), '--num_output_frames', str(n_lat)]
         import time; t0 = time.time()
