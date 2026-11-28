@@ -29,4 +29,9 @@ done
 wait
 CUDA_VISIBLE_DEVICES=0 python -m sf_cc.metrics --root $OUT --arms deepforcing > logs/sf/metrics_deepforcing.log 2>&1
 grep -h "Error\|Traceback" logs/sf/metrics_deepforcing.log | head
+# evaluation inside the job: benchmark table + pre-registered criteria (cached; flock so parallel jobs do not race)
+mkdir -p results_split
+flock results_split/.bench.lock python sf_cc/bench.py > logs/sf/bench_${SLURM_JOB_ID:-0}.log 2>&1 \
+  && { echo "===== BENCH (results_split/BENCH.md)"; grep -A3 "^## Pre-registered" results_split/BENCH.md | grep "^- "; } \
+  || { echo "[bench] FAILED"; tail -8 logs/sf/bench_${SLURM_JOB_ID:-0}.log; }
 echo "===== $(date '+%F %T') DONE: $(ls $OUT/deepforcing/*.mp4 | wc -l) Deep Forcing videos"

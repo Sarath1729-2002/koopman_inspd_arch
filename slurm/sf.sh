@@ -61,4 +61,9 @@ wait
 grep -h "Error\|Traceback" logs/sf/metrics_*.log | head
 python -m sf_cc.report $OUT; python -m sf_cc.report2 $OUT
 [[ $OUT == *long* ]] && { python -m sf_cc.mech $OUT > logs/sf/mech_${SLURM_JOB_ID}.log 2>&1 && grep -A2 "Pre-registered" $OUT/MECH.md || { echo "[mech] FAILED"; tail -8 logs/sf/mech_${SLURM_JOB_ID}.log; }; }
+# evaluation inside the job: benchmark table + pre-registered criteria (cached; flock so parallel jobs do not race)
+mkdir -p results_split
+flock results_split/.bench.lock python sf_cc/bench.py > logs/sf/bench_${SLURM_JOB_ID:-0}.log 2>&1 \
+  && { echo "===== BENCH (results_split/BENCH.md)"; grep -A3 "^## Pre-registered" results_split/BENCH.md | grep "^- "; } \
+  || { echo "[bench] FAILED"; tail -8 logs/sf/bench_${SLURM_JOB_ID:-0}.log; }
 echo "===== DONE -> $OUT/SF_REPORT.md  $OUT/fig_sf.png  videos in $OUT/<arm>/"
